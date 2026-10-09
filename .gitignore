@@ -13,4 +13,4 @@ third_party/
 records/
 *.csv
 
-docs/
+docs/*.md

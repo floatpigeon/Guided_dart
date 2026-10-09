@@ -1,69 +1,50 @@
 # K230D / K230 RT-Smart 业务代码仓库
 
-本仓库**与固件无关**：你的板子已烧录自定义 K230D RTOS 固件，本仓库只负责
-**业务代码**的开发、交叉编译，并把编译产物**拷贝到板子上运行**。
+本仓库**与固件无关**：它面向 K230D RT-Smart 用户态业务代码的开发和部署。
+
+> 当前分支只有构建骨架和设计文档，业务模块尚未落地；下文的 `apps/`、`src/`、`scripts/` 等是目标工作流。先阅读 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)，不要把目标路径当成现有实现。
 
 工作流（官方文档同款流程，见
 [如何运行和新增 HelloWorld 应用](https://www.kendryte.com/k230_rtos/zh/v0.8/userguide/helloworld.html)）：
 
 ```
-编写业务代码 → 交叉编译出 ELF → scp 拷贝到板子 → 板端 msh 运行
+编写业务代码 → 交叉编译出 ELF → scp 拷贝到板子 → 利用开机自启的跳板文件启动
 ```
 
 ---
 
 ## 1. 业务代码放在哪里？（最重要）
 
-```
-apps/
-├── app_template/        ← 骨架示例（可整体复制改名）
-│   ├── CMakeLists.txt   ← 定义 APP_NAME 与源文件
-│   └── main.c           ← 入口骨架（占位，非业务代码）
-├── launcher/            ← 开机自启动器（读 startup_final.list）
-├── green_led_ai/        ← ★ 当前主线：绿灯识别 + H.264 录像（单进程双子系统）
-├── board_probe/         ← 板端环境探针（MMZ/堆、CPU 频率、RVV、KPU/AI2D 设备、PM 档位）
-├── green_led_rtos/      ← 旧版（有帧双重所有权崩溃问题，已从启动清单移除，仅作对照）
-└── usb_cam_stream/      ← USB 回传原始画面（与 green_led_ai 互斥，都要独占 VICAP）
-```
+> 当前分支尚未创建具体业务应用；后续业务代码应放在 `src/`
+> 视觉、IMU、控制和录像模块。识别/跟踪的目标工况见 [`docs/DETECTOR_DESIGN.md`](docs/DETECTOR_DESIGN.md)，
+> 架构边界见 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)，板端调试模板见
+> [`docs/DEBUG_GUIDE.md`](docs/DEBUG_GUIDE.md)。
 
-> 当前主线应用是 **`apps/green_led_ai/`**，用 `--vision on/off`、`--record on/off`
-> 分别开关识别与录像；设计说明、板端自查步骤、参数表见
-> [`apps/green_led_ai/README.md`](apps/green_led_ai/README.md)。
->
-> 当前主线**导引程序**是 **`src/`**（`bash scripts/build.sh self_guiding_dart`），
-> 识别/跟踪层（启动阶段全图 RVV 粗筛 + 3 帧滑窗确认 → 跟踪阶段动态 ROI +
-> 带尺度预测的卡尔曼）的设计说明见 [`DETECTION_DESIGN.md`](DETECTION_DESIGN.md)，
-> 板端调试见 [`DEBUG_GUIDE.md`](DEBUG_GUIDE.md)，主机侧回归 `bash tests/host/run.sh`。
-
-- **一个 `apps/<应用名>/` 目录 = 一个板端可执行程序**。
 - 目录结构与官方 SDK 的 `src/applications/<应用名>/` 一一对应：
   本仓库用 CMake 独立编译，产物可直接拷板；需要打进固件镜像时，
   把整个目录拷进 SDK 的 `src/applications/` 再用官方 `make` 流程即可，产物等价。
-- **新增应用**：`cp -r apps/app_template apps/my_app`，然后改
-  `apps/my_app/CMakeLists.txt` 里的 `APP_NAME`，再写业务代码。
+- **新增应用（目标工作流）**：创建 `apps/my_app/`，补齐 `CMakeLists.txt` 和 `main.cpp`，再在顶层 CMake 注册它；当前分支尚未提供 `app_template`。
 
-> 你现有的/未来的业务代码（如传感器、算法、通信逻辑）都放在 `apps/` 下。
+> 你现有的/未来的业务代码（如传感器、算法、通信逻辑）都放在 `src/` 下。
 
 ## 2. 目录结构
 
 ```
 SelfGuidingDart/
-├── apps/                        # ★ 业务代码目录（重点）★
-│   └── app_template/            #   骨架应用
 ├── cmake/
 │   ├── toolchain-riscv64-musl.cmake   # 交叉编译工具链配置（rv64imafdcv/lp64d）
-│   └── link.lds                       # RT-Smart 链接脚本（取自官方 SDK）
-├── scripts/
-│   ├── setup-toolchain.sh       # 首次使用：安装 riscv64 musl 工具链
-│   ├── build.sh                 # 交叉编译（生成 build/compile_commands.json）
-│   └── deploy.sh                # scp 拷贝产物到板子
-├── .vscode/                     # VSCode 配置（clangd / CMake / 任务）
-├── .clangd                      # clangd 索引配置
-├── .clang-format                # 代码风格（与官方 SDK 一致）
-└── CMakeLists.txt               # 顶层构建脚本（公共编译/链接参数）
+│   └── link.lds                       # RT-Smart 链接脚本（取自自定义 SDK）
+├── scripts/                    # 目标：构建/部署脚本（当前尚未创建）
+├── src/                         # 目标：业务实现（当前尚未创建）
+├── include/                     # 目标：公共接口
+├── docs/                        # 设计和验收契约
+├── .vscode/                     # VSCode 配置
+└── CMakeLists.txt               # 顶层构建骨架
 ```
 
 ## 3. 首次准备（一次性）
+
+> 本节命令是目标工作流；当前分支的 `scripts/` 尚未创建，首次实现应先补齐脚本并验证工具链。
 
 ```bash
 # 安装交叉工具链（riscv64-unknown-linux-musl-，约 108MB，装到仓库 third_party/）
@@ -75,11 +56,6 @@ bash scripts/setup-toolchain.sh
 用环境变量 `K230_SDK_ROOT=/你的路径` 或 CMake 参数 `-DK230_SDK_ROOT=...` 覆盖）。
 
 ## 4. 编译
-
-```bash
-bash scripts/build.sh            # 编译 apps/ 下全部应用
-bash scripts/build.sh my_app     # 只编译指定应用
-```
 
 产物：`build/<应用名>/<应用名>` —— riscv64 静态链接 ELF，可直接拷板运行。
 同时生成 `build/compile_commands.json`，供 clangd 使用。

@@ -29,7 +29,7 @@
     "third_party/": true
   },
   "python.analysis.extraPaths": [
-    "/home/hyperlee/.kendryte/k230_canmv_stubs/95579ebe4e870ef4b36ddfcd62e304b22787c514"
+    "/home/hyperlee/.kendryte/k230_canmv_stubs/2ca35c7cec5ea7ed793f11ba0bd6b6aa7b27ddaf"
   ],
   "python.analysis.stubPath": "/home/hyperlee/.kendryte/k230_canmv_pylance/0908f139a3aa00b8/typings",
   "python.analysis.diagnosticSeverityOverrides": {
