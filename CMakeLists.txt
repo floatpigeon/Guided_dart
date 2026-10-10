@@ -18,8 +18,6 @@ cmake_minimum_required(VERSION 3.20)
 
 project(k230d_rtos_apps LANGUAGES C CXX)
 
-include(CTest)
-
 # C data-plane modules use a strict C11 ABI; the orchestration/control plane
 # uses the common C++23 subset (notably std::expected).
 set(CMAKE_C_STANDARD 11)
@@ -91,7 +89,7 @@ target_link_options(k230_rtos_app INTERFACE
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals/CMakeLists.txt")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals")
 endif()
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src")
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/include/firmware/app/src/camera")
 file(GLOB _app_dirs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/apps/*")
 foreach(_dir IN LISTS _app_dirs)
   if(IS_DIRECTORY "${_dir}" AND EXISTS "${_dir}/CMakeLists.txt")
@@ -101,13 +99,3 @@ endforeach()
 
 message(STATUS "K230_SDK_ROOT        = ${K230_SDK_ROOT}")
 message(STATUS "K230_TOOLCHAIN_DIR   = ${K230_TOOLCHAIN_DIR}")
-
-# Toolchain probe: this target is intentionally tiny and has no SDK dependencies.
-# Building it is part of the host/cross validation matrix.
-add_executable(dart_expected_probe tests/expected_probe.cpp)
-target_include_directories(dart_expected_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-set_target_properties(dart_expected_probe PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
-target_compile_options(dart_expected_probe PRIVATE -fno-exceptions)
-if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
-  add_test(NAME dart_expected_probe COMMAND dart_expected_probe)
-endif()

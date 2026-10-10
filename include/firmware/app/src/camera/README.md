@@ -1,15 +1,22 @@
 # Camera ACL
 
+> T1 migration: this README retains the v1 contract and historical validation
+> text. The current boundary is [camera.h](camera.h) and
+> [camera_error_codes.h](camera_error_codes.h); [CMakeLists.txt](CMakeLists.txt)
+> provides interface targets until T2..T7 add implementations. The historical
+> validation below is not evidence for v2. No v2 board execution is validated:
+> **BLOCKED: hardware validation pending**.
+
 The C data plane owns camera initialization, fixed frame leases, mappings and
 DMA cache synchronization. The C++ control plane exposes `IExposureControl`.
-Only `camera_k230.c` includes K230 or POSIX device/runtime headers. There is no
+Only the C data-plane implementation includes K230 or POSIX device/runtime headers. There is no
 host implementation of MPP: host builds compile pure configuration, exposure
 calculation and lease logic only.
 
 ## Exposure
 
-Upper layers include `camera/exposure_control.hpp` and receive an injected
-`IExposureControl &`. They call one virtual function:
+The v1 upper layers received an injected `IExposureControl &` and called one
+virtual function (historical example; the replacement interface lands in T7):
 
 ```cpp
 auto result = exposure.set_exposure_us(requested_us);
@@ -18,9 +25,10 @@ if (!result) {
 }
 ```
 
-The composition root constructs `CameraExposureControl` from a camera handle
-using `camera/exposure_adapter.hpp`. The camera must outlive this non-owning
-adapter. Calls to camera/media objects and the adapter must be serialized.
+The v1 composition root constructed `CameraExposureControl` from a camera handle.
+Its headers have been removed; the replacement interface and adapter land in T7.
+The camera must outlive a non-owning adapter. Calls to camera/media objects and
+the adapter must be serialized.
 
 Fixed mode disables AE at device initialization. After stream start, the ACL
 gets the sensor fd, queries the range in microseconds, clamps the command and
@@ -73,27 +81,26 @@ before it enters control or tracking.
 Host:
 
 ```sh
-cmake -S . -B /tmp/dart-camera-host -DBUILD_TESTING=ON
+cmake -S . -B /tmp/dart-camera-host -DDART_CAMERA_K230=OFF
 cmake --build /tmp/dart-camera-host --parallel
-ctest --test-dir /tmp/dart-camera-host --output-on-failure
 ```
 
-Board targets use installed SDK headers/libraries and an explicit toolchain:
+Board targets use installed SDK headers/libraries and an explicit toolchain
+once T2..T7 provide their implementations:
 
 ```sh
 cmake -S . -B /tmp/dart-camera-cross \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-riscv64-musl.cmake \
   -DK230_TOOLCHAIN_DIR=/path/to/riscv64-musl/bin \
   -DK230_SDK_ROOT=/mnt/mydata/kRTOSSDK \
-  -DDART_CAMERA_K230=ON -DBUILD_TESTING=OFF
+  -DDART_CAMERA_K230=ON
 cmake --build /tmp/dart-camera-cross \
-  --target dart_camera_probe dart_camera_cpp_probe dart_expected_probe
+  --target dart_camera_k230 dart_camera_acl
 ```
 
 `K230_MPP_LIB_DIR` and `K230_LINK_SCRIPT` are explicit override points for other
-SDK builds. `dart_camera_cpp_probe` checks actual virtual dispatch, the adapter,
-`std::expected` and `-fno-exceptions -fno-rtti` against the C ACL and MPP libraries.
-It does not acquire hardware. No C++23 fallback implementation is introduced.
+SDK builds. The C++ ACL uses C++23 and `-fno-exceptions -fno-rtti`.
+No C++23 fallback implementation is introduced. The v1 probe targets are removed.
 
 ## Validation
 
@@ -107,17 +114,8 @@ GCC 12.0.1 toolchain compiled and statically linked the C camera probe, real C++
 adapter probe and expected probe with the local SDK. Actual board execution is
 **BLOCKED: hardware validation pending**.
 
-The board probe takes all parameters explicitly; choose a sensor-supported
-mode and a calibrated exposure:
-
-```text
-dart_camera_probe CSI_PORT SENSOR_WIDTH SENSOR_HEIGHT FPS OUTPUT_WIDTH OUTPUT_HEIGHT EXPOSURE_US FRAME_COUNT
-```
-
-It prints requested/accepted exposure and range, then raw PTS, receipt time,
-dimensions, stride and the first luma sample. It bounds frame count and timeout
-and reports status, operation and native/rollback errors at the decision boundary.
-It is a diagnostic executable, not a flight application.
+The v1 diagnostic executable is removed. A v2 board diagnostic is outside this
+round; choose a sensor-supported mode and calibrated exposure for board validation.
 
 Board acceptance must verify private pool compatibility, cache freshness under
 DMA, stable frame timing, actual exposure/line quantization, warm restart and
