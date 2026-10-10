@@ -18,6 +18,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(k230d_rtos_apps LANGUAGES C CXX)
 
+include(CTest)
+
 # C data-plane modules use a strict C11 ABI; the orchestration/control plane
 # uses the common C++23 subset (notably std::expected).
 set(CMAKE_C_STANDARD 11)
@@ -76,15 +78,19 @@ if(_hal_lib_dirs)
 endif()
 
 # 4) 链接参数：与 SDK 一致 —— 使用 RT-Smart 链接脚本 + 静态链接
+set(K230_LINK_SCRIPT "${K230_SDK_ROOT}/src/rtsmart/libs/mk/link.lds" CACHE FILEPATH
+    "RT-Smart user application linker script")
 target_link_options(k230_rtos_app INTERFACE
-    "-T${CMAKE_CURRENT_SOURCE_DIR}/cmake/link.lds"
+    "-T${K230_LINK_SCRIPT}"
     --static
     -Wl,--gc-sections)
 
 # ---------------------------------------------------------------------------
 # 收集 apps/ 下所有业务应用（每个子目录 = 一个板端可执行程序）
 # ---------------------------------------------------------------------------
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals/CMakeLists.txt")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals")
+endif()
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src")
 file(GLOB _app_dirs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/apps/*")
 foreach(_dir IN LISTS _app_dirs)
@@ -102,3 +108,6 @@ add_executable(dart_expected_probe tests/expected_probe.cpp)
 target_include_directories(dart_expected_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set_target_properties(dart_expected_probe PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
 target_compile_options(dart_expected_probe PRIVATE -fno-exceptions)
+if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
+  add_test(NAME dart_expected_probe COMMAND dart_expected_probe)
+endif()

@@ -2,7 +2,7 @@
 
 本仓库**与固件无关**：它面向 K230D RT-Smart 用户态业务代码的开发和部署。
 
-> 当前分支只有构建骨架和设计文档，业务模块尚未落地；下文的 `apps/`、`src/`、`scripts/` 等是目标工作流。先阅读 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)，不要把目标路径当成现有实现。
+> 相机 C 数据面、C++ 曝光虚接口和构建探针已落地，见 [`src/camera/README.md`](src/camera/README.md)。其余业务模块和下文的构建/部署脚本仍是目标工作流。先阅读 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)，不要把目标路径当成现有实现。
 
 工作流（官方文档同款流程，见
 [如何运行和新增 HelloWorld 应用](https://www.kendryte.com/k230_rtos/zh/v0.8/userguide/helloworld.html)）：
