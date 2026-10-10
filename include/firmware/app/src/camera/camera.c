@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "camera_media_internal.h"
+#include "camera_internal.h"
 #include "k_vb_comm.h"
 #include "k_vicap_comm.h"
 #include "mpi_sensor_api.h"
@@ -51,21 +51,6 @@ _Static_assert(K_ERR_VICAP_OPT_ALREADY_WRITE == DART_K230_E_VICAP_OPT_ALREADY_WR
                "VICAP option mirror drifted");
 _Static_assert(K_ERR_VICAP_BUSY <= DART_CAMERA_CODE_VENDOR_MAX,
                "vendor error codes no longer occupy the vendor range");
-
-enum { DART_CAMERA_MAGIC = 0x4443414Du };
-
-struct dart_camera {
-    uint32_t magic;
-    uint32_t state;
-    dart_media_t *media;
-    dart_camera_config_t config;
-    dart_camera_caps_t caps;
-    dart_camera_output_pool_t output_pool;
-    int32_t sensor_fd;
-    uint8_t vicap_initialized;
-    uint8_t stream_started;
-    uint8_t exposure_configured;
-};
 
 /* T5 owns range handling and the SDK seconds write. T3 only invokes it for
  * the configured initial fixed exposure after the sensor handle is available.
@@ -363,6 +348,16 @@ int dart_camera_stop(dart_camera_t *camera) {
     if (!valid_camera(camera)) {
         return DART_CAMERA_E_INVALID_ARGUMENT;
     }
+    if (camera->lease.active) {
+        return DART_CAMERA_E_BUSY;
+    }
+    if (camera->frame_held) {
+        const int release_rc = dart_camera_release_dump(camera);
+        if (release_rc != DART_CAMERA_OK) {
+            camera->state = DART_CAMERA_STATE_FAULTED;
+            return release_rc;
+        }
+    }
     if (!camera->stream_started) {
         if (camera->state == DART_CAMERA_STATE_EMPTY) {
             return DART_CAMERA_E_INVALID_STATE;
@@ -391,7 +386,17 @@ int dart_camera_deinit(dart_camera_t *camera) {
     if (camera->state == DART_CAMERA_STATE_EMPTY) {
         return DART_CAMERA_E_INVALID_STATE;
     }
+    if (camera->lease.active) {
+        return DART_CAMERA_E_BUSY;
+    }
 
+    if (camera->frame_held && !camera->stream_started) {
+        const int release_rc = dart_camera_release_dump(camera);
+        if (release_rc != DART_CAMERA_OK) {
+            camera->state = DART_CAMERA_STATE_FAULTED;
+            return release_rc;
+        }
+    }
     if (camera->stream_started) {
         const int rc = dart_camera_stop(camera);
         if (rc != DART_CAMERA_OK) {
