@@ -9,13 +9,13 @@
   "clangd.path": "clangd",
 
   // ===== CMake（VS Code CMake Tools 扩展）=====
-  "cmake.buildDirectory": "${workspaceFolder}/build",
-  "cmake.configureArgs": [
-    "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/cmake/toolchain-riscv64-musl.cmake",
-    "-DK230_SDK_ROOT=/mnt/mydata/kRTOSSDK",
-    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
-  ],
-  "cmake.generator": "Ninja",
+  // 构建目录、生成器和工具链由 CMakePresets.json 拥有：host → build/（主机 + clangd 用
+  // 的 compile_commands.json），cross → build-cross/（RISC-V，需先 export
+  // K230_TOOLCHAIN_DIR）。不要再用 cmake.configureArgs 无条件指定交叉工具链文件：
+  // 本机没装工具链时配置必然失败，build/compile_commands.json 就永远生成不出来，
+  // clangd 只能退回没有 -std/-I 的 fallback 命令（std::span/std::expected 全部报错）。
+  // 交叉构建请在命令面板选择 "cross" preset。
+  "cmake.useCMakePresets": "always",
 
   // ===== 关闭 MS C/C++ 的 IntelliSense，避免与 clangd 冲突 =====
   "C_Cpp.intelliSenseEngine": "disabled",

@@ -146,3 +146,10 @@ readability-static-definition-in-anonymous-namespace,
 readability-string-compare,
 readability-uniqueptr-delete-release,
 readability-use-anyofallof'
+
+CheckOptions:
+  # Feature-test macros are the documented way to request POSIX/glibc
+  # declarations and the leading underscore is mandated by those standards, so
+  # bugprone-reserved-identifier can only misfire on them. Anything not listed
+  # here is still reported.
+  bugprone-reserved-identifier.AllowedIdentifiers: '_POSIX_C_SOURCE;_GNU_SOURCE;_DEFAULT_SOURCE;_XOPEN_SOURCE;_BSD_SOURCE;_FILE_OFFSET_BITS'

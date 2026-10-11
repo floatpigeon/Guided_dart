@@ -61,6 +61,12 @@ static int valid_camera(const dart_camera_t *camera) {
     return camera != NULL && camera->magic == DART_CAMERA_MAGIC;
 }
 
+static int sensor_probe_error(int code) {
+    /* kd_mpi_sensor_adapt_get uses small legacy values (1/2) for
+     * probe failures; translate those before they enter the site-code ABI. */
+    return code > 0 ? DART_CAMERA_E_SENSOR_PROBE_FAILED : code;
+}
+
 static int exact_sensor_mode(const dart_camera_config_t *config,
                              const k_vicap_sensor_info *sensor) {
     return sensor->width == config->sensor_width &&
@@ -190,7 +196,7 @@ int dart_camera_init(dart_camera_t *camera, dart_media_t *media,
     k_vicap_sensor_info sensor = {0};
     rc = kd_mpi_sensor_adapt_get(&probe, &sensor);
     if (rc != 0) {
-        const int primary = rc;
+        const int primary = sensor_probe_error(rc);
         (void)cleanup_init_resources(camera);
         return primary;
     }
@@ -411,7 +417,8 @@ int dart_camera_destroy(dart_camera_t *camera) {
         return DART_CAMERA_E_INVALID_ARGUMENT;
     }
     if (camera->state != DART_CAMERA_STATE_EMPTY || camera->media != NULL ||
-        camera->vicap_initialized || camera->stream_started) {
+        camera->vicap_initialized || camera->stream_started ||
+        camera->frame_held || camera->lease.active) {
         return DART_CAMERA_E_BUSY;
     }
     camera->magic = 0;

@@ -1,0 +1,34 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "host",
+      "displayName": "host (K230 off, clangd compile database)",
+      "description": "Host configuration: builds camera_config.c / frame_lease.c / camera_error.cpp and writes build/compile_commands.json for clangd. K230 data-plane sources are only built by the cross preset.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "DART_CAMERA_K230": "OFF",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "cross",
+      "displayName": "cross (RISC-V musl, needs K230_TOOLCHAIN_DIR)",
+      "description": "K230 cross build. Requires a riscv64-unknown-linux-musl toolchain: export K230_TOOLCHAIN_DIR=/path/to/bin before configuring, otherwise the toolchain file fails with an explicit error.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-cross",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-riscv64-musl.cmake",
+      "cacheVariables": {
+        "DART_CAMERA_K230": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "K230_TOOLCHAIN_DIR": "$env{K230_TOOLCHAIN_DIR}"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "host", "configurePreset": "host" },
+    { "name": "cross", "configurePreset": "cross" }
+  ]
+}
