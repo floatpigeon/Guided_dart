@@ -1,11 +1,11 @@
-#include "camera.h"
+#include "camera/c_api/camera.h"
 
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "camera_internal.h"
+#include "camera/k230/internal.h"
 #include "k_vb_comm.h"
 #include "k_vicap_comm.h"
 #include "mpi_sensor_api.h"
@@ -52,10 +52,10 @@ _Static_assert(K_ERR_VICAP_OPT_ALREADY_WRITE == DART_K230_E_VICAP_OPT_ALREADY_WR
 _Static_assert(K_ERR_VICAP_BUSY <= DART_CAMERA_CODE_VENDOR_MAX,
                "vendor error codes no longer occupy the vendor range");
 
-/* T5 owns range handling and the SDK seconds write. T3 only invokes it for
- * the configured initial fixed exposure after the sensor handle is available.
+/* The seconds writer and its range query live in k230/exposure.c and are
+ * declared in c_api/camera.h. Lifecycle only applies the configured initial
+ * exposure.
  */
-extern int dart_camera_set_exposure_seconds(dart_camera_t *camera, float seconds);
 
 static int valid_camera(const dart_camera_t *camera) {
     return camera != NULL && camera->magic == DART_CAMERA_MAGIC;
@@ -138,6 +138,8 @@ static int cleanup_init_resources(dart_camera_t *camera) {
         camera->sensor_fd = -1;
         camera->stream_started = 0;
         camera->exposure_configured = 0;
+        memset(camera->frame_held, 0, sizeof(camera->frame_held));
+        dart_frame_lease_pool_init(&camera->leases, 0);
         memset(&camera->config, 0, sizeof(camera->config));
         memset(&camera->caps, 0, sizeof(camera->caps));
     } else {
@@ -183,6 +185,9 @@ int dart_camera_init(dart_camera_t *camera, dart_media_t *media,
     }
     camera->media = media;
     camera->config = *config;
+    /* Capacity is injected by the caller; slots at or above it stay unused. */
+    memset(camera->frame_held, 0, sizeof(camera->frame_held));
+    dart_frame_lease_pool_init(&camera->leases, config->max_outstanding_frames);
     camera->state = DART_CAMERA_STATE_INITIALIZED;
 
     k_vicap_probe_config probe = {0};
@@ -354,11 +359,11 @@ int dart_camera_stop(dart_camera_t *camera) {
     if (!valid_camera(camera)) {
         return DART_CAMERA_E_INVALID_ARGUMENT;
     }
-    if (camera->lease.active) {
+    if (dart_frame_lease_active(&camera->leases) > 0u) {
         return DART_CAMERA_E_BUSY;
     }
-    if (camera->frame_held) {
-        const int release_rc = dart_camera_release_dump(camera);
+    for (uint32_t slot = 0; slot < DART_CAMERA_MAX_OUTSTANDING_FRAMES; ++slot) {
+        const int release_rc = dart_camera_release_dump(camera, slot);
         if (release_rc != DART_CAMERA_OK) {
             camera->state = DART_CAMERA_STATE_FAULTED;
             return release_rc;
@@ -392,15 +397,17 @@ int dart_camera_deinit(dart_camera_t *camera) {
     if (camera->state == DART_CAMERA_STATE_EMPTY) {
         return DART_CAMERA_E_INVALID_STATE;
     }
-    if (camera->lease.active) {
+    if (dart_frame_lease_active(&camera->leases) > 0u) {
         return DART_CAMERA_E_BUSY;
     }
 
-    if (camera->frame_held && !camera->stream_started) {
-        const int release_rc = dart_camera_release_dump(camera);
-        if (release_rc != DART_CAMERA_OK) {
-            camera->state = DART_CAMERA_STATE_FAULTED;
-            return release_rc;
+    if (dart_camera_held_frames(camera) > 0u && !camera->stream_started) {
+        for (uint32_t slot = 0; slot < DART_CAMERA_MAX_OUTSTANDING_FRAMES; ++slot) {
+            const int release_rc = dart_camera_release_dump(camera, slot);
+            if (release_rc != DART_CAMERA_OK) {
+                camera->state = DART_CAMERA_STATE_FAULTED;
+                return release_rc;
+            }
         }
     }
     if (camera->stream_started) {
@@ -418,7 +425,8 @@ int dart_camera_destroy(dart_camera_t *camera) {
     }
     if (camera->state != DART_CAMERA_STATE_EMPTY || camera->media != NULL ||
         camera->vicap_initialized || camera->stream_started ||
-        camera->frame_held || camera->lease.active) {
+        dart_camera_held_frames(camera) > 0u ||
+        dart_frame_lease_active(&camera->leases) > 0u) {
         return DART_CAMERA_E_BUSY;
     }
     camera->magic = 0;
@@ -431,6 +439,16 @@ int dart_camera_get_state(const dart_camera_t *camera, uint32_t *state) {
         return DART_CAMERA_E_INVALID_ARGUMENT;
     }
     *state = camera->state;
+    return DART_CAMERA_OK;
+}
+
+int dart_camera_get_lease_usage(const dart_camera_t *camera, uint32_t *outstanding,
+                                uint32_t *capacity) {
+    if (!valid_camera(camera) || outstanding == NULL || capacity == NULL) {
+        return DART_CAMERA_E_INVALID_ARGUMENT;
+    }
+    *outstanding = dart_frame_lease_active(&camera->leases);
+    *capacity = dart_frame_lease_capacity(&camera->leases);
     return DART_CAMERA_OK;
 }
 

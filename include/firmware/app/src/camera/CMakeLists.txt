@@ -25,7 +25,7 @@ function(_dart_camera_add_library target)
     set(${target}_scope "${_scope}" PARENT_SCOPE)
 endfunction()
 
-_dart_camera_add_library(dart_camera_core camera_config.c frame_lease.c)
+_dart_camera_add_library(dart_camera_core c_api/config.c c_api/lease.c)
 target_compile_features(dart_camera_core ${dart_camera_core_scope} c_std_11)
 
 # Editor support: clangd can only use sources that have a compile command, and a
@@ -40,21 +40,19 @@ option(DART_CAMERA_CLANGD_COMMANDS
     "Emit compile commands for SDK-dependent sources so editors can parse them" ON)
 if(DART_CAMERA_CLANGD_COMMANDS AND NOT DART_CAMERA_K230)
     add_library(dart_camera_k230_compile_commands OBJECT EXCLUDE_FROM_ALL
-        camera.c camera_media.c camera_frame.c camera_exposure.c)
+        k230/lifecycle.c k230/media.c k230/frame.c k230/exposure.c)
     target_link_libraries(dart_camera_k230_compile_commands PRIVATE k230_rtos_app)
     target_compile_features(dart_camera_k230_compile_commands PRIVATE c_std_11)
     target_compile_options(dart_camera_k230_compile_commands PRIVATE -Wall -Wextra -Wpedantic)
     target_include_directories(dart_camera_k230_compile_commands PRIVATE
         "${PROJECT_SOURCE_DIR}/include/firmware/app/include"
         "${PROJECT_SOURCE_DIR}/include/firmware/app/src")
-    # A header has no compile command of its own, so clangd borrows the command
-    # of some other file in the same directory. For camera_internal.h that lands
-    # on camera_config.c, which carries no SDK include paths, and every vendor
-    # header it includes then looks missing. Marking this header as a compilable
-    # source gives it the same command as its includers instead of duplicating
-    # the SDK paths in a second configuration file.
-    set_source_files_properties(camera_internal.h PROPERTIES LANGUAGE C)
-    target_sources(dart_camera_k230_compile_commands PRIVATE camera_internal.h)
+    # A header has no compile command of its own, so clangd borrows one from a
+    # neighbouring file. Marking k230/internal.h as a compilable source gives it
+    # the SDK include paths deterministically, instead of depending on which
+    # neighbour clangd happens to pick.
+    set_source_files_properties(k230/internal.h PROPERTIES LANGUAGE C)
+    target_sources(dart_camera_k230_compile_commands PRIVATE k230/internal.h)
 endif()
 
 if(DART_CAMERA_K230)
@@ -72,7 +70,7 @@ if(DART_CAMERA_K230)
         message(FATAL_ERROR "Missing RT-Smart linker script: ${K230_LINK_SCRIPT}")
     endif()
     _dart_camera_add_library(dart_camera_k230
-        camera.c camera_media.c camera_frame.c camera_exposure.c)
+        k230/lifecycle.c k230/media.c k230/frame.c k230/exposure.c)
     target_link_libraries(dart_camera_k230 ${dart_camera_k230_scope} dart_camera_core)
     if(dart_camera_k230_scope STREQUAL "PUBLIC")
         set(_sdk_scope PRIVATE)
@@ -92,9 +90,9 @@ if(DART_CAMERA_K230)
         -Wl,--end-group pthread m)
 endif()
 
-set(_acl_sources camera_error.cpp)
+set(_acl_sources error.cpp)
 if(DART_CAMERA_K230)
-    list(APPEND _acl_sources k230_camera.cpp)
+    list(APPEND _acl_sources k230/camera.cpp)
 endif()
 _dart_camera_add_library(dart_camera_acl ${_acl_sources})
 target_compile_features(dart_camera_acl ${dart_camera_acl_scope} cxx_std_23)

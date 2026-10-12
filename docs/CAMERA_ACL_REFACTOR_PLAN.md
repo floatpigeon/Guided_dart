@@ -4,6 +4,21 @@
 >
 > 本文档是执行契约：§1 的边界约定与 §1.1 的三处遗留处置均已确认冻结，T1 之后的任务不得再改；有异议在开工前提出。
 > 注意：`.gitignore` 含 `docs/*.md`，本文档以 `git add -f` 方式纳入版本控制。
+>
+> **契约修订（2026-10-11，已确认）**：§1.2 / §1.3 / §1.4 中"单未决租约 + `optional<FrameLease>`"的约定作废，改为**上层注入的有界租约容量**：
+> - **C ABI 升到 v3**：`dart_camera_config_t` 新增 `max_outstanding_frames`（1..`channel_buffers`，上限 `DART_CAMERA_MAX_OUTSTANDING_FRAMES`），`DART_CAMERA_ABI_VERSION = 3`；令牌全局唯一，**释放顺序自由**；新增站点码 `DART_CAMERA_E_LEASE_EXHAUSTED(141)`（正常否定结果，不是故障）与只读查询 `dart_camera_get_lease_usage`。
+> - **C 侧按槽位持有 dump**：`frame_held[]` / `frame_info[]` / `dart_frame_lease_pool_t`；`dart_camera_release_dump(camera, slot)`。stop/deinit/destroy 仍在任一租约未释放时返回 BUSY。失败的帧回收会释放其租约槽位（失败帧不占容量），未能释放的 dump 留给 stop/deinit 重试并置 FAULTED。
+> - **C++ 侧容量以编译期参数注入**：`create_k230_camera<N>`，槽位是 `std::array<detail::FrameLeaseSlot, N>`，成功路径零分配（原逐帧 `new` 一并消除），`capacity()`/`outstanding()` 供上层实施自己的丢弃策略；`acquire` 返回三态 `AcquireResult{kFrame, kNoFrame, kLeaseExhausted}`，**耗尽即丢帧**：不触碰驱动、不进错误通道。
+> - **析构安全**：相机销毁时仍被持有的租约被脱钩为 `kDetached`，其后 `release()` 返回 `StaleLeaseError`，不再解引用已销毁对象；SDK 句柄保留待显式重试（上层违反"先释放再销毁"的代价是泄漏而非崩溃）。
+> - **验证状态**：主机构建、`gcc -fsyntax-only`（真实 SDK 头）、clangd 静态检查均通过；**交叉构建与交叉链接均已通过**（见 §3，工具链在 `SelfGuidingDart/third_party/toolchain/`）；
+>
+> **布局与命名修订（2026-10-11，第二次，已确认）**：按 librmcs 的约定重排文件层次与命名，取代 §1.1 与 §1.5 的原树：
+> - **平台进目录/命名空间，不进类名**：`k230_camera.hpp/.cpp` → `k230/camera.hpp/.cpp`；类 `K230Camera<N>` → `dart::camera::k230::Camera<N>`；工厂 `create_k230_camera<N>` → `dart::camera::k230::create<N>`（对应 librmcs 的 `librmcs::firmware::gpio::Gpio`）。
+> - **按层分目录**：平台无关的接口与错误层留在模块根（`camera.hpp`、`error.hpp/.cpp`、`error_codes.h`）；C ABI 与平台无关实现进 `c_api/`（`camera.h`、`config.c`、`lease.h/.c`）；一切碰 SDK 的东西进 `k230/`（4 个 `.c` + 两个私有头 + C++ 适配器）。"谁能碰厂商头"从"靠自觉"变成"看目录"。
+> - **模块内 include 改为模块限定**（`#include "camera/k230/internal.h"`），不再使用 `../`。
+> - **验证**：重排后主机构建、SDK 头 `gcc -fsyntax-only`、交叉构建、交叉链接探针、clangd 全量扫描、两个 `/tmp` harness（C 池 63 项 / C++ 适配器 87 项）全部复跑通过；本次只改名字与位置，未改语义。
+> - §2/§3 里 T1..T7 的文件名是当时的执行记录，保持原样不再回改。
+租约状态机与 C++ 适配器各有一个一次性 `/tmp` harness（**未入库**，本轮决定不引入 `tests/`）：C 池 63 项、C++ 适配器 87 项检查全部通过。板端仍为 `BLOCKED: hardware validation pending`。
 
 ---
 
@@ -35,20 +50,31 @@ L1  C 数据面（纯 C）        camera.c / media / frame / exposure / config�
 
 ```
 include/firmware/app/include/status.h          # 保留但本轮不接线/不修改：跨模块通用状态码（本模块不依赖它）
-include/firmware/app/src/camera/
-├── camera.h                # C ABI v2：POD 结构 + int 返回；无 dart_error_t、无 error 出参
-├── camera_error_codes.h    # dart 站点码表 + 码空间划分宏 + K230 SDK 码镜像表
-├── camera.c                # 生命周期：create/init/start/stop/deinit/destroy/state/caps
-├── camera_media.c          # media(VB) 所有权 + 私有输出池 + 块映射
-├── camera_frame.c          # acquire/release/租约/缓存 invalidate/时间戳
-├── camera_exposure.c       # 曝光范围查询 + 秒写入（clamp/换算移到 C++）
-├── camera_config.c         # config init/validate（纯 C，可主机编译）
-├── frame_lease.h / .c      # 租约状态机（纯 C，内部）
-├── camera.hpp              # C++ 虚拟接口：ICamera / FrameLease / FrameView / 类型化枚举
-├── camera_error.hpp/.cpp   # 多态错误对象层次 + 翻译器 + 固定缓冲文本出口
-├── k230_camera.hpp/.cpp    # ACL 适配器：ICamera 的 K230 实现（唯一 include camera.h 的 C++）
-├── README.md               # 模块契约（由 src/camera/README.md 平移而来，本轮只改路径不改正文）
+include/firmware/app/src/camera/               # 模块根只放平台无关的接口与错误层
+├── camera.hpp              # L3 虚拟接口：ICamera / FrameLease / FrameView / AcquireResult / 类型化枚举
+├── error.hpp / error.cpp   # L2 多态错误对象层次 + 翻译器 + 固定缓冲文本出口
+├── error_codes.h           # C/C++ 共用：码空间划分宏 + dart 站点码表 + K230 SDK 码镜像表
+├── c_api/                  # L1 C ABI 与平台无关实现（只返回 int）
+│   ├── camera.h            # 公开 C ABI：POD 结构 + int 返回；无 error 出参
+│   ├── config.c            # config init/validate（纯 C，可主机编译）
+│   └── lease.h / lease.c   # 有界租约池状态机（纯 C，可主机编译）
+├── k230/                   # 平台特化：唯一允许碰 SDK 头与 camera.h 的地方
+│   ├── internal.h          # struct dart_camera 与 TU 间私有契约（含 k_video_frame_info）
+│   ├── media.h             # 输出池描述 + attach/detach 契约
+│   ├── lifecycle.c         # 生命周期：create/init/start/stop/deinit/destroy/state/caps/usage
+│   ├── media.c             # media(VB) 所有权 + 私有输出池 + 块映射
+│   ├── frame.c             # acquire/release/dump/缓存 invalidate/时间戳
+│   ├── exposure.c          # 曝光范围查询 + 秒写入（clamp/换算在 C++）
+│   └── camera.hpp/.cpp     # ACL 适配器 dart::camera::k230::Camera<N> + create<N>()
+├── README.md               # 模块契约
 └── CMakeLists.txt          # 模块构建 + include 导出
+
+命名约定（对齐 librmcs）：**平台进目录与命名空间，不进类名**——适配器是
+`dart::camera::k230::Camera`，不是 `K230Camera`（对应 librmcs 的
+`librmcs::firmware::gpio::Gpio`）；文件名小写下划线、限定交给所在目录
+（`c_api/camera.h` 与 `k230/frame.c` 不再背 `camera_` 前缀）；同名文件出现在不同层
+是可接受的（librmcs 的 `spec/*/gpio.hpp` 与 `app/src/gpio/gpio.hpp` 同理），由 include
+路径区分。
 ```
 
 **删除清单**
@@ -133,7 +159,8 @@ int dart_camera_create(dart_camera_t **camera);
 int dart_camera_init(dart_camera_t *camera, dart_media_t *media,
                      const dart_camera_config_t *config);
 int dart_camera_start(dart_camera_t *camera);
-/* 0 之外的 DART_CAMERA_E_NO_FRAME 表示"这次没等到帧"，不是错误 */
+/* 正常否定结果有两个：DART_CAMERA_E_NO_FRAME（这次没等到帧）与
+ * DART_CAMERA_E_LEASE_EXHAUSTED（槽位占满，本帧不取、由驱动回收）。见契约修订。 */
 int dart_camera_acquire_frame(dart_camera_t *camera, uint32_t timeout_ms,
                               dart_camera_frame_t *frame);
 int dart_camera_release_frame(dart_camera_t *camera, const dart_camera_frame_t *frame);
@@ -141,6 +168,8 @@ int dart_camera_stop(dart_camera_t *camera);
 int dart_camera_deinit(dart_camera_t *camera);
 int dart_camera_destroy(dart_camera_t *camera);
 int dart_camera_get_state(const dart_camera_t *camera, uint32_t *state);
+int dart_camera_get_lease_usage(const dart_camera_t *camera, uint32_t *outstanding,
+                                uint32_t *capacity);
 int dart_camera_get_caps(const dart_camera_t *camera, dart_camera_caps_t *caps);
 int dart_camera_get_exposure_range(const dart_camera_t *camera, float *min_us, float *max_us);
 int dart_camera_set_exposure_seconds(dart_camera_t *camera, float seconds);
@@ -152,7 +181,7 @@ int dart_camera_config_validate(const dart_camera_config_t *config);
 
 ### 1.3 C++ 侧：多态错误对象 + 翻译器
 
-存放方式：`std::expected<T, std::unique_ptr<const CameraError>>`，真虚函数多态，仅在失败路径分配；**超时/无帧不进错误通道**（`std::optional` 空值），保证轮询循环零分配。
+存放方式：`std::expected<T, std::unique_ptr<const CameraError>>`，真虚函数多态，仅在失败路径分配；**超时/无帧/租约耗尽都不进错误通道**（见契约修订：`AcquireResult` 三态，成功路径零分配）。
 
 ```cpp
 namespace dart::camera {
@@ -221,29 +250,37 @@ struct FrameView {                         // 不泄漏 C 结构体
     std::chrono::microseconds received;    // CLOCK_MONOTONIC 接收时间
 };
 
-class FrameLease {                         // move-only RAII
+class FrameLease {                         // move-only RAII，指向所属相机的槽位（无堆分配）
 public:
     FrameLease(FrameLease &&) noexcept;
     FrameLease &operator=(FrameLease &&) noexcept;
-    ~FrameLease();                          // 尽力释放：失败不吞掉，登记待重试并让下次调用显式报错
+    ~FrameLease();                          // 尽力释放：失败不吞掉，登记进槽位并让下次调用显式报错
     const FrameView &view() const noexcept;
     std::expected<void, ErrorPtr> release() noexcept;   // 显式释放优先
+};
+
+struct AcquireResult {                     // 三态：有帧 / 没帧 / 槽位占满（丢帧）
+    AcquireStatus status;                  // kFrame | kNoFrame | kLeaseExhausted
+    FrameLease lease;                      // 仅当 status == kFrame
 };
 
 class ICamera {
 public:
     virtual ~ICamera() = default;
     virtual std::expected<void, ErrorPtr> start() noexcept = 0;
-    /* 空 optional = 这段时间没有帧（正常否定结果，不分配、不刷日志），有值 = 租约 */
-    virtual std::expected<std::optional<FrameLease>, ErrorPtr>
+    virtual std::expected<AcquireResult, ErrorPtr>
         acquire(std::chrono::milliseconds timeout) noexcept = 0;
     virtual std::expected<void, ErrorPtr> stop() noexcept = 0;
     virtual State state() const noexcept = 0;
     virtual const Caps &caps() const noexcept = 0;
     virtual std::expected<void, ErrorPtr> set_fixed_exposure_us(std::uint32_t us) noexcept = 0;
+    virtual std::uint32_t capacity() const noexcept = 0;      // 创建时注入的槽位数
+    virtual std::uint32_t outstanding() const noexcept = 0;   // 当前未释放的租约数
 };
 
-/* 工厂：create → init → start 三分离，初始化失败不抛异常、不打印 */
+/* 工厂：create → init → start 三分离，初始化失败不抛异常、不打印。
+ * 容量由上层以编译期参数注入；C ABI 允许的每个容量都在 k230_camera.cpp 显式实例化。 */
+template <std::uint32_t kCapacity = 1>
 std::expected<std::unique_ptr<ICamera>, ErrorPtr>
 create_k230_camera(const Config &config) noexcept;
 ```
@@ -253,14 +290,15 @@ create_k230_camera(const Config &config) noexcept;
 ### 1.5 include 路径与 CMake
 
 - 导出 `include/firmware/app/include`（`#include "status.h"`）与 `include/firmware/app/src`（`#include "camera/camera.hpp"`）；
-- 模块内文件之间用引号相对包含（与 librmcs 的 `app/src/gpio/*.hpp` 同构），不额外开根；
+- 模块内文件之间用引号**模块限定**包含（`#include "camera/k230/internal.h"`），根就是已导出的 `include/firmware/app/src`；与 librmcs 的仓库相对 include 同构，不再出现 `../`；
 - 目标划分（名字暂定，T1 定稿）：
 
 | 目标 | 源 | 何时构建 |
 |---|---|---|
-| `dart_camera_core` | `camera_config.c`、`frame_lease.c` | 任意环境（纯 C） |
-| `dart_camera_k230` | `camera.c`、`camera_media.c`、`camera_frame.c`、`camera_exposure.c` | `DART_CAMERA_K230=ON`（需 SDK + 交叉工具链） |
-| `dart_camera_acl` | `camera_error.cpp`（+ 交叉时 `k230_camera.cpp`） | 任意环境；适配器部分随 `DART_CAMERA_K230` |
+| `dart_camera_core` | `c_api/config.c`、`c_api/lease.c` | 任意环境（纯 C） |
+| `dart_camera_k230` | `k230/lifecycle.c`、`k230/media.c`、`k230/frame.c`、`k230/exposure.c` | `DART_CAMERA_K230=ON`（需 SDK + 交叉工具链） |
+| `dart_camera_acl` | `error.cpp`（+ 交叉时 `k230/camera.cpp`） | 任意环境；适配器部分随 `DART_CAMERA_K230` |
+| `dart_camera_k230_compile_commands` | 同 `dart_camera_k230` 的 4 个源 + `k230/internal.h` | 仅 `DART_CAMERA_K230=OFF`；EXCLUDE_FROM_ALL，只为 clangd 产出编译命令 |
 | 测试目标 | — | **全部移除**（本轮不做测试） |
 
 风格基线沿用仓库现有配置：`.clang-format`（LLVM、100 列、4 空格、指针左对齐）、`.clang-tidy`、C11 + C++23、`-Wall -Wextra -Wpedantic`、代码 ASCII（注释可中文）。两个配置文件在 2026-10-11 从 `.clangd-format` / `.clangd-tidy` 改名为标准名（clangd/clang-format/clang-tidy 只识别 `.clang-format` / `.clang-tidy`，旧名等于没人加载）。`.clang-format` 的 `Standard` 仍是 `c++20`，与 C++23 基线不一致，待单独确认后再改。
@@ -341,7 +379,7 @@ create_k230_camera(const Config &config) noexcept;
 | 主机（纯 C 模块） | `gcc -std=c11 -Wall -Wextra -Wpedantic -c camera_config.c frame_lease.c` | 通过/失败 |
 | 主机（C++ 接口与错误层） | `g++ -std=c++23 -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic -fsyntax-only`（`-fno-exceptions` 下 `std::expected` 路径必须编译） | 通过/失败 |
 | 主机（SDK 相关 `.c` 语法） | `gcc -fsyntax-only`，include 参数复用顶层 CMake 的 `k230_rtos_app` 列表（`$K230_SDK_ROOT/include`、`mpp/include{,/comm,/ioctl}`、`mpp/userapps/api{,/framework}`、`-include autoconf.h`） | 通过/失败 |
-| 交叉构建 | `cmake -S . -B /tmp/dart-cross -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-riscv64-musl.cmake -DK230_TOOLCHAIN_DIR=... -DK230_SDK_ROOT=/mnt/mydata/kRTOSSDK -DDART_CAMERA_K230=ON` + `--build --target dart_camera_k230 dart_camera_acl` | **当前 BLOCKED**：本机未安装交叉工具链（`/opt/toolchain` 为空、`~/.kendryte/k230_toolchains` 为空、`SelfGuidingDart/third_party` 下只有 binutils 无 gcc）；装上后按上述命令补证 |
+| 交叉构建 | `K230_TOOLCHAIN_DIR=/mnt/mydata/SelfGuidingDart/third_party/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin cmake --preset cross` + `cmake --build --preset cross --target dart_camera_k230 dart_camera_acl`；链接用 `/tmp/link_probe.cpp` 之类的探针把 `libdart_camera_{acl,k230,core}.a` + SDK 静态库 + `link.lds` 链成一个 ELF | **已通过（2026-10-11）**：三个目标库编译成功，探针链出 1.6 MB 静态 RISC-V ELF。这条同时证明目标 GCC 12.0.1 上 `std::expected`/`std::span` 与 `-fno-exceptions -fno-rtti` 可用（原"未验证前不要假设"的风险已消除）。**工具链实际位于 `SelfGuidingDart/third_party/toolchain/`，此前"本机未安装工具链"的记录有误** |
 | 板端 | 诊断程序（本轮不建） | **BLOCKED: hardware validation pending**——私有池兼容性、DMA 后 cache 新鲜度、真实帧时序、曝光行量化、热重启与清理失败都必须板端证据 |
 
 诚实结论：本轮可验证的承诺只有"主机编译 + 静态检查 + 边界自洽（`static_assert`）"；"相机能用"必须等交叉构建与板端证据，文档与提交信息中不得写成已通过。

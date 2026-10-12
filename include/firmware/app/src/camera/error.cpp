@@ -1,5 +1,5 @@
-#include "camera.hpp"
-#include "camera_error.hpp"
+#include "camera/camera.hpp"
+#include "camera/error.hpp"
 
 #include <array>
 #include <charconv>
@@ -11,7 +11,7 @@
 namespace dart::camera {
 namespace {
 
-constexpr std::array<std::int32_t, 25> kSiteCodes = {
+constexpr std::array<std::int32_t, 26> kSiteCodes = {
     DART_CAMERA_E_INVALID_ARGUMENT,
     DART_CAMERA_E_INVALID_STATE,
     DART_CAMERA_E_BUSY,
@@ -36,6 +36,7 @@ constexpr std::array<std::int32_t, 25> kSiteCodes = {
     DART_CAMERA_E_EXPOSURE_RANGE_FAILED,
     DART_CAMERA_E_EXPOSURE_WRITE_FAILED,
     DART_CAMERA_E_LEASE_ABI_MISMATCH,
+    DART_CAMERA_E_LEASE_EXHAUSTED,
     DART_CAMERA_E_SITE_CODE_MAX,
 };
 
@@ -57,6 +58,18 @@ static_assert(site_codes_are_unique(), "camera site codes must be unique");
 template <typename Error>
 ErrorPtr make_error(std::int32_t code, const CallContext& context) noexcept {
     return ErrorPtr(new (std::nothrow) Error(code, context));
+}
+
+/* A lease whose camera is already gone cannot be released; reporting staleness is
+ * the only honest answer, and it must not touch the dead owner.
+ */
+std::expected<void, ErrorPtr> stale_lease_release(std::uint64_t token) noexcept {
+    CallContext context{};
+    context.operation = Operation::kRelease;
+    context.lease_token = token;
+    context.lease_generation = token;
+    return std::unexpected<ErrorPtr>(
+        translate_camera_code(DART_CAMERA_E_STALE_LEASE, context));
 }
 
 }  // namespace
@@ -281,6 +294,7 @@ ErrorPtr translate_camera_code(std::int32_t code, const CallContext& context) no
         case DART_CAMERA_E_INVALID_STATE:
             return make_error<StateError>(code, context);
         case DART_CAMERA_E_BUSY:
+        case DART_CAMERA_E_LEASE_EXHAUSTED:
             return make_error<BusyError>(code, context);
         case DART_CAMERA_E_NOT_SUPPORTED:
             return make_error<UnsupportedError>(code, context);
@@ -314,46 +328,54 @@ ErrorPtr translate_camera_code(std::int32_t code, const CallContext& context) no
     }
 }
 
-FrameLease::FrameLease(FrameLease&& other) noexcept
-    : state_(std::move(other.state_)) {}
+FrameLease::FrameLease(FrameLease&& other) noexcept : slot_(other.slot_) {
+    other.slot_ = nullptr;
+}
 
 FrameLease& FrameLease::operator=(FrameLease&& other) noexcept {
     if (this == &other) return *this;
-    if (state_ != nullptr && !state_->released) {
+    if (slot_ != nullptr && slot_->state == detail::FrameLeaseSlotState::kHeld) {
         auto result = release();
-        if (!result && state_ != nullptr && state_->remember_failure != nullptr) {
-            state_->remember_failure(state_.get(), std::move(result.error()));
-        }
+        if (!result && slot_ != nullptr) slot_->pending_error = std::move(result.error());
     }
-    state_ = std::move(other.state_);
+    slot_ = other.slot_;
+    other.slot_ = nullptr;
     return *this;
 }
 
 FrameLease::~FrameLease() {
-    if (state_ == nullptr || state_->released) return;
+    if (slot_ == nullptr || slot_->state != detail::FrameLeaseSlotState::kHeld) return;
     auto result = release();
-    if (!result && state_ != nullptr && state_->remember_failure != nullptr) {
-        state_->remember_failure(state_.get(), std::move(result.error()));
+    if (!result && slot_ != nullptr && slot_->state == detail::FrameLeaseSlotState::kHeld) {
+        /* A destructor cannot report a failure, so the owning camera keeps it and
+         * surfaces it on its next protected call instead of losing it. */
+        slot_->pending_error = std::move(result.error());
     }
 }
 
 const FrameView& FrameLease::view() const noexcept {
     static const FrameView empty{};
-    if (state_ == nullptr || state_->released) return empty;
-    return state_->view;
+    if (slot_ == nullptr || slot_->state != detail::FrameLeaseSlotState::kHeld) return empty;
+    return slot_->view;
+}
+
+bool FrameLease::valid() const noexcept {
+    return slot_ != nullptr && slot_->state == detail::FrameLeaseSlotState::kHeld;
 }
 
 std::expected<void, ErrorPtr> FrameLease::release() noexcept {
-    if (state_ == nullptr || state_->released) return {};
-    if (state_->release == nullptr) {
-        state_->released = true;
+    if (slot_ == nullptr) return {};
+    detail::FrameLeaseSlot* slot = slot_;
+    if (slot->state == detail::FrameLeaseSlotState::kFree) {
+        slot_ = nullptr;
         return {};
     }
-    auto result = state_->release(state_.get());
-    if (result) {
-        state_->released = true;
-        state_.reset();
+    if (slot->state == detail::FrameLeaseSlotState::kDetached || slot->release == nullptr) {
+        slot_ = nullptr;
+        return stale_lease_release(slot->token);
     }
+    auto result = slot->release(slot);
+    if (result) slot_ = nullptr;
     return result;
 }
 

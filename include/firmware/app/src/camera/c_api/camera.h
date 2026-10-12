@@ -3,14 +3,18 @@
 
 #include <stdint.h>
 
-#include "camera_error_codes.h"
+#include "camera/error_codes.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define DART_CAMERA_ABI_VERSION 2u
+#define DART_CAMERA_ABI_VERSION 3u
 #define DART_CAMERA_MAX_BUFFERS 10u
+/* Ceiling for config.max_outstanding_frames. A held lease keeps one channel
+ * buffer busy, so usable capacity is additionally bounded by channel_buffers.
+ */
+#define DART_CAMERA_MAX_OUTSTANDING_FRAMES 10u
 
 /* Handles are created once at startup. All calls must be serialized. */
 typedef struct dart_media dart_media_t;
@@ -44,6 +48,10 @@ typedef struct dart_camera_config {
     uint32_t output_height;    /* 240..2160, even; no upscaling. */
     uint32_t capture_buffers;  /* 3..10. */
     uint32_t channel_buffers;  /* 3..10. */
+    uint32_t max_outstanding_frames; /* 1..channel_buffers and <= MAX_OUTSTANDING.
+                                      * Capacity is injected by the caller: it may
+                                      * hold this many frames at once. 1 keeps the
+                                      * single-frame behaviour. */
     uint32_t exposure_mode;
     uint32_t initial_exposure_us;
     uint32_t mirror;           /* 0: none, 1: horizontal, 2: vertical, 3: both. */
@@ -78,7 +86,7 @@ typedef struct dart_camera_frame {
     const dart_camera_t* owner;
 } dart_camera_frame_t;
 
-/* Operations return only a code from camera_error_codes.h; outputs carry data.
+/* Operations return only a code from camera/error_codes.h; outputs carry data.
  * C never logs or constructs errors. Rollback retains the primary return code;
  * failed rollback is observable as DART_CAMERA_STATE_FAULTED via get_state.
  */
@@ -100,20 +108,32 @@ int dart_camera_init(dart_camera_t* camera, dart_media_t* media,
  * If initial_exposure_us is zero in fixed mode, acquire is blocked until set.
  */
 int dart_camera_start(dart_camera_t* camera);
-/* Finite timeout, 0=poll, <=1000 ms. One outstanding frame per camera.
- * DART_CAMERA_E_NO_FRAME is a normal no-frame result, not an error.
+/* Finite timeout, 0=poll, <=1000 ms. Up to max_outstanding_frames frames may be
+ * outstanding at once, each carrying a distinct token, and release may happen in
+ * any order. Two results are normal negatives rather than errors:
+ * DART_CAMERA_E_NO_FRAME (no frame arrived in time) and
+ * DART_CAMERA_E_LEASE_EXHAUSTED (every slot is held, so this frame is not taken
+ * and is recycled by the driver, i.e. dropped by policy).
  */
 int dart_camera_acquire_frame(dart_camera_t* camera, uint32_t timeout_ms,
                              dart_camera_frame_t* frame);
-/* A failed SDK release retains the lease; retry with the same frame. */
+/* A failed SDK release retains the lease, so retry with the same frame. A stale,
+ * doubled or foreign token is rejected and changes nothing.
+ */
 int dart_camera_release_frame(dart_camera_t* camera, const dart_camera_frame_t* frame);
-/* Stop/deinit return BUSY while the caller owns a frame. */
+/* Stop/deinit return BUSY while any lease is outstanding. */
 int dart_camera_stop(dart_camera_t* camera);
 /* Also stops an active stream. Retry after cleanup failure; handle is retained. */
 int dart_camera_deinit(dart_camera_t* camera);
 /* Only succeeds after deinit. Never silently drops resources. */
 int dart_camera_destroy(dart_camera_t* camera);
 int dart_camera_get_state(const dart_camera_t* camera, uint32_t* state);
+/* Lease accounting for callers applying their own bounded-drop policy:
+ * outstanding = leases still held, capacity = config.max_outstanding_frames.
+ * Observable diagnostics, not an error channel.
+ */
+int dart_camera_get_lease_usage(const dart_camera_t* camera, uint32_t* outstanding,
+                                uint32_t* capacity);
 int dart_camera_get_caps(const dart_camera_t* camera, dart_camera_caps_t* caps);
 
 /* Fixed mode only, after start. Range limits preserve SDK fractional values.

@@ -1,7 +1,7 @@
 #ifndef DART_CAMERA_MEDIA_INTERNAL_H
 #define DART_CAMERA_MEDIA_INTERNAL_H
 
-#include "camera.h"
+#include "camera/c_api/camera.h"
 
 /* Private C data-plane interface. No SDK types cross this header. Calls remain
  * serialized, as required by camera.h. Attach before preparing a pool; detach

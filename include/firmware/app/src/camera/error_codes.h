@@ -51,6 +51,11 @@ enum {
 
     /* 140..159: lease ABI. */
     DART_CAMERA_E_LEASE_ABI_MISMATCH = 140,
+    /* Every configured lease slot is held. Not a fault: the caller must finish
+     * (release) a lease before taking another frame. The frame stays in the
+     * driver pool and is recycled, i.e. it is dropped by policy.
+     */
+    DART_CAMERA_E_LEASE_EXHAUSTED = 141,
 
     DART_CAMERA_E_SITE_CODE_MAX = 999,
 };

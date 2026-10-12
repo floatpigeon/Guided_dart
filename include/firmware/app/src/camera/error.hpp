@@ -6,7 +6,7 @@
 #include <memory>
 #include <string_view>
 
-#include "camera_error_codes.h"
+#include "camera/error_codes.h"
 
 namespace dart::camera {
 

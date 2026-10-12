@@ -2,6 +2,21 @@
 
 目标不是把 `.cpp` 批量改成 `.c`，而是建立“C 数据面 + C++ 控制面”的稳定边界，在不改变识别语义和帧所有权的前提下减少运行期分配、复制和不可诊断的硬件耦合。
 
+> **修订（2026-10-11，已确认）**：本文档原计划让识别/录像走 C 数据面 + `dart_status_t` C ABI。经确认，本轮改为：
+> 1. **`detection/` 与 `recorder/` 是纯 C++ 模块**，位置 `src/{detection,recorder}/`（**根目录的 `src/`**：`STRUCTURE_DESIGN.md` §3 就是 `src/` 放业务实现、`include/` 放公共接口；上层模块不进相机模块的 `include/.../src/`），对外只暴露 C++ 接口（`dart::detection::IDetector`、`dart::recorder::Recorder`），输入是相机模块的 `dart::camera::FrameView`（只读 Y8 视图，含帧号 `sequence` 与接收时间）。§2.1 的 `dart_status_t`/`dart_gray_frame_t` 与 §2.2 的定长 `DartError` **不再采用**：跨层错误沿用相机模块的 `int` 站点码 + `std::expected`；业务模块尚无共享错误类型，录像 `start()` 暂用 `bool` + `last_error()`，该缺口记在下方"未决问题"。
+> 2. **本轮 recorder 只做灰度证据落盘**（PGM/PBM + events.csv，有界队列 + 写线程 + 丢帧计数），不碰厂商 API。v1 的录像 100% 依赖 VENC/VB（`kd_mpi_venc_*` ×12、`kd_mpi_vb_*` ×6，无软件编码路径），硬件 H.264 需要一个独立的 `video/` ACL（照相机模块的三层做法），留待后续。
+> 3. **帧分发用"拷贝"模型**：采集线程独占 `ICamera`，`acquire → 二值化/识别 → 拷 Y 进 recorder 空闲块 → release`，与 v1 同构；租约所有权不跨线程（release 本身是一次相机调用，必须留在采集线程）。
+> 4. **内核语言可后置**：对外纯 C++ 与内核是否为 C 是两件事。v1 的三个 RVV 内核（`binarize.c`、`tile_scanner_c.c`、`roi_measure_c.c`）零厂商依赖，可原样搬入并由 C++ 适配器包裹；`DETECTOR_DESIGN.md` 要求的标量参考路径一并保留。
+>
+> **v1 调研结论（移植前必读）**：
+> - v1 的 `IDetector::detect(const GrayFrame&)` 吃的是**已二值化**的 0/255 图，且 `tile_scanner_c.c`/`roi_measure_c.c` 把亮度门限写死为 `DART_BRIGHT_MIN 128u`。要让模块直接消费 Y8 灰度，必须把二值化并入模块并把该常量改为运行期阈值。
+> - `roi_measure_c.c` 坐标用 `uint16`：宽/高 > 65535 直接拒收，runs 上限 65535（640×360/1280×720 无碍，但要写进契约）。
+> - `TileScanner::run` 在尺寸变化时会每帧重新 `prepare()` → `new (std::nothrow) uint8_t[]`，违反"运行态不分配"；移植时改为启动期固定 workspace。
+> - v1 识别层唯一的厂商依赖是 `vision/frame_pool.{hpp,cpp}`（MMZ/VB），**整块删除**，由 `FrameView` 取代；`src/detection/` 全树零 SDK 依赖、无 `throw`/`dynamic_cast`/`typeid`，与 `-fno-exceptions -fno-rtti` 天然兼容。
+> - v1 检测跑在采集线程，无检测专用线程——与第 3 条的拷贝模型一致。
+>
+> **未决问题**：业务模块（识别/录像）的共享错误类型尚未确定；`VISION_C_REFACTOR_PLAN` 原定的定长 `DartError` 与 `STRUCTURE_DESIGN.md` §2.2 同源，需与相机模块的多态 `ErrorPtr` 一并裁决。
+
 ## 1. 目标和非目标
 
 目标：
@@ -73,8 +88,8 @@ C 回调一律 `(void *context, const event *)`，C++ 用 `extern "C" noexcept` 
 | 全图扫描 | C | `src/detection/scanner/tile_scanner.c` | 瓦片统计和 RVV 快路径，不能认识 tracker |
 | ROI 测量 | C | `src/detection/measure/roi_measure.c` | 固定工作区、连通域和形状质量 |
 | 几何纯函数 | C | `src/detection/geometry/*.c` | POD 输入输出、无全局状态 |
-| 录像数据面 | C | `src/recording/recorder.c` | 固定队列、MPP/VENC、写线程状态 |
-| pipeline/tracker | C++ | `src/detection/*.cpp` | 编排、状态机、滤波、诊断和 C/C++ 翻译 |
+| 录像/取证 | C++（本轮决定） | `src/recorder/recorder.cpp` | 有界队列、丢帧计数、写线程；灰度证据（PGM/PBM/CSV）。硬件 H.264 归后续 `video/` ACL |
+| pipeline/tracker | C++ | `src/detection/*.cpp`（本轮：接口在 `src/detection/`，实现待移植） | 编排、状态机、滤波、诊断和 C/C++ 翻译 |
 | 控制/主程序 | C++ | `src/control/`、`apps/<app>/` | 生命周期、策略、配置和依赖组装 |
 
 先保持 C++ 的模块包括 `DetectionPipeline`、`TargetTracker`、尺度卡尔曼和应用入口；若将来要移除 libstdc++，另开任务，不与第一轮数据面迁移混合。

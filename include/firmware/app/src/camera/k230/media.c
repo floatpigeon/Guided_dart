@@ -1,4 +1,4 @@
-#include "camera_media_internal.h"
+#include "camera/k230/media.h"
 
 #include <stdlib.h>
 

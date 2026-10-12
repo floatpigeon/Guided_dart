@@ -1,14 +1,18 @@
 # Camera ACL
 
-> T1 migration: this README retains the v1 contract and historical validation
-> text. The current boundary is [camera.h](camera.h) and
-> [camera_error_codes.h](camera_error_codes.h); [CMakeLists.txt](CMakeLists.txt)
-> provides interface targets until T2..T7 add implementations. The historical
-> validation below is not evidence for v2. No v2 board execution is validated:
+> Layout follows librmcs: `camera.hpp` / `error.*` / `error_codes.h` are the
+> platform-free interface and error layers, `c_api/` is the C ABI plus its
+> platform-free implementations, and `k230/` is the only place that may include
+> SDK headers or the C ABI. The current C boundary is
+> [c_api/camera.h](c_api/camera.h) and [error_codes.h](error_codes.h); the C++
+> entry point is `dart::camera::k230::create<N>()` in
+> [k230/camera.hpp](k230/camera.hpp). Historical validation text below is not
+> evidence for the current code. No board execution is validated:
 > **BLOCKED: hardware validation pending**.
 
-The C data plane owns camera initialization, fixed frame leases, mappings and
-DMA cache synchronization. The C++ control plane exposes `IExposureControl`.
+The C data plane owns camera initialization, frame leases, mappings and
+DMA cache synchronization. The C++ control plane exposes `ICamera`
+(`camera.hpp`), implemented for this board by `dart::camera::k230::Camera<N>`.
 Only the C data-plane implementation includes K230 or POSIX device/runtime headers. There is no
 host implementation of MPP: host builds compile pure configuration, exposure
 calculation and lease logic only.
@@ -55,10 +59,29 @@ The camera owns a private output pool and maps every block before streaming.
 Acquisition returns read-only Y8 luma, not full NV12. DMA writes the pixels; the
 ACL invalidates cache on every acquisition. No application allocation, mapping,
 unmapping or pixel copy occurs in acquire/release. `stride` may exceed `width`.
-Only one frame may be outstanding. A lease carries owner identity and generation;
-stale/double/wrong-owner releases are rejected. SDK release failure retains the
-lease so the same frame can be retried. Stop/deinit return BUSY while the caller
-owns a frame. Copies of frame structs are aliases, not additional references.
+The caller injects a lease capacity: up to `max_outstanding_frames` frames may be
+outstanding at once, each carrying a distinct token, and release order is free. A
+lease carries owner identity and token; stale/double/wrong-owner releases are
+rejected. SDK release failure retains the lease so the same frame can be retried.
+Stop/deinit return BUSY while any lease is outstanding. Copies of frame structs
+are aliases, not additional references.
+
+Capacity is bounded twice: by the ceiling in `error_codes.h`
+(`DART_CAMERA_MAX_OUTSTANDING_FRAMES`) and by `channel_buffers`, because each held
+lease keeps one driver buffer busy. Requesting more is a configuration error.
+When every slot is already held, acquire does not touch the driver at all: it
+reports `DART_CAMERA_E_LEASE_EXHAUSTED`, the frame stays in the driver pool and is
+recycled there. That is a drop, not a failure, so a pipeline counts it instead of
+logging an error. On the C++ side the capacity is a compile-time parameter of the
+factory (`dart::camera::k230::create<N>`), which sizes the lease slots statically and
+removes the per-frame allocation; `capacity()` and `outstanding()` let a producer
+apply its own bounded-drop policy before calling `acquire()`.
+
+A lease must be released before the camera is destroyed. Destroying the camera
+first does not free the frame — the data plane refuses to stop while a lease is
+active — so such a lease is detached and a later release reports a stale lease
+instead of reaching into a destroyed object. The SDK handles are retained for an
+explicit retry rather than dropped silently.
 
 Startup/shutdown may allocate/free. Shutdown order is release frame, camera
 deinit, camera destroy, media destroy. Failed cleanup retains handles and pool

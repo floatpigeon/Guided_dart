@@ -5,7 +5,7 @@
     {
       "name": "host",
       "displayName": "host (K230 off, clangd compile database)",
-      "description": "Host configuration: builds camera_config.c / frame_lease.c / camera_error.cpp and writes build/compile_commands.json for clangd. K230 data-plane sources are only built by the cross preset.",
+      "description": "Host configuration: builds camera/c_api/config.c, camera/c_api/lease.c and camera/error.cpp and writes build/compile_commands.json for clangd. K230 data-plane sources are only built by the cross preset.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {

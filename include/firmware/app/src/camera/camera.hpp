@@ -5,11 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <memory>
-#include <optional>
 #include <span>
 
-#include "camera_error.hpp"
+#include "camera/error.hpp"
 
 namespace dart::camera {
 
@@ -46,6 +44,10 @@ struct Caps {
     ExposureMode exposure_mode = ExposureMode::kFixed;
 };
 
+/* Lease capacity is deliberately absent: the caller injects it as a
+ * compile-time parameter of the concrete camera, so the compiler knows the bound
+ * and the adapter needs no runtime allocation for its lease slots.
+ */
 struct Config {
     std::uint32_t csi_port = 0;
     std::uint32_t sensor_width = 0;
@@ -66,17 +68,53 @@ struct FrameView {
     std::uint32_t height = 0;
     std::uint32_t stride = 0;
     std::uint64_t source_pts = 0;
+    /* Frame identity: the lease token, stamped when a slot is reserved. Later
+     * stages need it to name evidence, to correlate a detection result with the
+     * frame that produced it, and to spot gaps. A gap means that acquisition
+     * attempt produced no frame (E_NO_FRAME); a drop for lack of capacity
+     * consumes nothing, because the driver is never touched.
+     */
+    std::uint64_t sequence = 0;
     bool source_pts_timebase_validated = false;
     std::chrono::microseconds received{};
 };
 
+enum class AcquireStatus : std::uint8_t {
+    /* The lease holds a frame, valid until it is released. */
+    kFrame,
+    /* No frame arrived inside the timeout: a normal negative result, not an
+     * error, and it allocates nothing.
+     */
+    kNoFrame,
+    /* Every lease slot is held, so no frame was taken from the driver and the
+     * frame is recycled there: the bounded-capacity drop signal.
+     */
+    kLeaseExhausted,
+};
+
 namespace detail {
 
-struct FrameLeaseState;
-using ReleaseFunction = std::expected<void, ErrorPtr> (*)(FrameLeaseState*) noexcept;
-using FailureFunction = void (*)(FrameLeaseState*, ErrorPtr) noexcept;
+class FrameLeaseAccess;
 
-struct FrameLeaseState {
+enum class FrameLeaseSlotState : std::uint8_t {
+    kFree,
+    kHeld,
+    /* The camera was destroyed while this lease was still held. The lease can no
+     * longer be released; doing so reports a stale lease instead of calling into
+     * a dead object.
+     */
+    kDetached,
+};
+
+struct FrameLeaseSlot;
+
+using ReleaseFunction = std::expected<void, ErrorPtr> (*)(FrameLeaseSlot* slot) noexcept;
+
+/* One lease slot. The concrete camera owns an array with exactly as many slots
+ * as its capacity parameter, so a lease is a pointer into that array instead of
+ * an allocation and the bound is known at compile time.
+ */
+struct FrameLeaseSlot {
     FrameView view{};
     void* owner = nullptr;
     std::uint64_t token = 0;
@@ -88,12 +126,18 @@ struct FrameLeaseState {
     std::uint64_t source_pts = 0;
     std::uint64_t received_us = 0;
     ReleaseFunction release = nullptr;
-    FailureFunction remember_failure = nullptr;
-    bool released = false;
+    /* Set when a lease is destroyed without a successful release, so the owning
+     * camera can retry it and report it instead of losing it.
+     */
+    ErrorPtr pending_error{};
+    FrameLeaseSlotState state = FrameLeaseSlotState::kFree;
 };
 
 }  // namespace detail
 
+/* Move-only RAII handle to one slot of the owning camera. Releasing twice, or
+ * after the camera is gone, is reported rather than silently ignored.
+ */
 class FrameLease {
 public:
     FrameLease() noexcept = default;
@@ -105,14 +149,18 @@ public:
 
     const FrameView& view() const noexcept;
     std::expected<void, ErrorPtr> release() noexcept;
-    bool valid() const noexcept { return state_ != nullptr && !state_->released; }
+    bool valid() const noexcept;
 
 private:
-    explicit FrameLease(std::unique_ptr<detail::FrameLeaseState> state) noexcept
-        : state_(std::move(state)) {}
+    explicit FrameLease(detail::FrameLeaseSlot* slot) noexcept : slot_(slot) {}
 
-    std::unique_ptr<detail::FrameLeaseState> state_;
-    friend class K230Camera;
+    detail::FrameLeaseSlot* slot_ = nullptr;
+    friend class detail::FrameLeaseAccess;
+};
+
+struct AcquireResult {
+    AcquireStatus status = AcquireStatus::kNoFrame;
+    FrameLease lease{};
 };
 
 struct ExposurePlan {
@@ -132,17 +180,37 @@ public:
     virtual ~ICamera() = default;
 
     virtual std::expected<void, ErrorPtr> start() noexcept = 0;
-    virtual std::expected<std::optional<FrameLease>, ErrorPtr> acquire(
+    /* Three outcomes, only one of which is an error: a frame, no frame, or a full
+     * lease pool. A caller with its own bounded pipeline drops on
+     * kLeaseExhausted and counts it.
+     */
+    virtual std::expected<AcquireResult, ErrorPtr> acquire(
         std::chrono::milliseconds timeout) noexcept = 0;
     virtual std::expected<void, ErrorPtr> stop() noexcept = 0;
     virtual State state() const noexcept = 0;
     virtual const Caps& caps() const noexcept = 0;
     virtual std::expected<void, ErrorPtr> set_fixed_exposure_us(
         std::uint32_t us) noexcept = 0;
+
+    /* Lease slots fixed at creation, and how many are in use right now. A
+     * producer can check these before acquiring to apply its own drop policy.
+     */
+    virtual std::uint32_t capacity() const noexcept = 0;
+    virtual std::uint32_t outstanding() const noexcept = 0;
 };
 
-std::expected<std::unique_ptr<ICamera>, ErrorPtr> create_k230_camera(
-    const Config& config) noexcept;
+namespace detail {
+
+/* Grants camera implementations access to a lease's private slot without naming
+ * any concrete camera in this header.
+ */
+class FrameLeaseAccess {
+public:
+    static FrameLease make(FrameLeaseSlot* slot) noexcept { return FrameLease(slot); }
+    static FrameLeaseSlot* slot_of(const FrameLease& lease) noexcept { return lease.slot_; }
+};
+
+}  // namespace detail
 
 }  // namespace dart::camera
 

@@ -1,4 +1,4 @@
-#include "camera.h"
+#include "camera/c_api/camera.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -11,6 +11,9 @@ void dart_camera_config_init(dart_camera_config_t *config) {
     config->struct_size = sizeof(*config);
     config->capture_buffers = 4;
     config->channel_buffers = 4;
+    /* One outstanding frame unless the caller injects more: each held lease
+     * keeps one channel buffer busy, so capacity may never exceed it. */
+    config->max_outstanding_frames = 1;
     config->exposure_mode = DART_CAMERA_EXPOSURE_FIXED;
 }
 
@@ -34,6 +37,9 @@ int dart_camera_config_validate(const dart_camera_config_t *config) {
         config->capture_buffers > DART_CAMERA_MAX_BUFFERS ||
         config->channel_buffers < 3u ||
         config->channel_buffers > DART_CAMERA_MAX_BUFFERS ||
+        config->max_outstanding_frames == 0u ||
+        config->max_outstanding_frames > DART_CAMERA_MAX_OUTSTANDING_FRAMES ||
+        config->max_outstanding_frames > config->channel_buffers ||
         config->exposure_mode > DART_CAMERA_EXPOSURE_AUTO ||
         (config->exposure_mode == DART_CAMERA_EXPOSURE_AUTO &&
          config->initial_exposure_us != 0u)) {
