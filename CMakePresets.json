@@ -22,6 +22,7 @@
       "toolchainFile": "${sourceDir}/cmake/toolchain-riscv64-musl.cmake",
       "cacheVariables": {
         "DART_CAMERA_K230": "ON",
+        "DART_IMU_K230": "ON",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "K230_TOOLCHAIN_DIR": "$env{K230_TOOLCHAIN_DIR}"
       }

@@ -72,7 +72,7 @@ foreach(_lib_dir IN LISTS _hal_lib_dirs)
   target_link_directories(k230_rtos_app INTERFACE "${_lib_dir}")
 endforeach()
 if(_hal_lib_dirs)
-  target_link_libraries(k230_rtos_app INTERFACE -Wl,--start-group pwm i2c gpio fpioa -Wl,--end-group)
+  target_link_libraries(k230_rtos_app INTERFACE -Wl,--start-group pwm i2c gpio fpioa spi -Wl,--end-group)
 endif()
 
 # 4) 链接参数：与 SDK 一致 —— 使用 RT-Smart 链接脚本 + 静态链接
@@ -89,7 +89,9 @@ target_link_options(k230_rtos_app INTERFACE
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals/CMakeLists.txt")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals")
 endif()
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/include/firmware/app/src/camera")
+# include/ 下集中声明全部固件侧库目标（camera / spi / imu …）；
+# 模块子目录只放源码，不再各自持有 CMakeLists.txt。
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src")
 file(GLOB _app_dirs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/apps/*")
 foreach(_dir IN LISTS _app_dirs)
