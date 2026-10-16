@@ -1,15 +1,18 @@
 # 检测与 ROI
 
 纯 C++23 模块，CMake 目标为 `dart_detection`（**STATIC**，编译
-`detector.cpp` 与 `roi.cpp`）。输入为相机 ACL 的只读 `dart::camera::FrameView`；
+`detector.cpp` 与 `roi.cpp`）。输入为 L3 公开的只读 `dart::camera::FrameView`；
 检测同步借用像素，不取帧、不释放租约、不保留帧指针。
+
+本模块属于 L4，只包含 `camera/frame_view.hpp`，构建时依赖头文件目标
+`dart_camera_types`；不链接相机 ACL、K230 后端、录像服务或应用入口。
 
 `detector.cpp`（`BlobWorkspace` / `LightDetector` / `ArmorDetector`）与 `roi.cpp`
 （`internal::LightTracker` / `internal::RoiPolicy` / `RoiDetector`）是**两个独立翻译
 单元**，各自 `#include "detector.hpp"`、方法在类外定义，文件内没有重复包含保护。
 因此消费者**只包含 `detector.hpp` 并链接 `dart_detection`**，不要 `#include` 任何
 `.cpp`（早前 README 里"包含 roi.cpp 即可"的写法已作废：那样两个文件既不编译也不被
-类型检查）。已完成的应用示例见 `src/vision/main.cpp`。
+类型检查）。已完成的应用示例见 `app/application.cpp`。
 
 初始化时构造 `dart::detection::RoiDetector` 并调用
 `Prepare(max_width, max_height)`。在现有采集线程拿到 `AcquireStatus::kFrame` 后调用：
@@ -68,5 +71,5 @@ if (result && result->target.valid) {
 `include/detection/math/shape_metrics.hpp`。
 
 `dart_detection` 已在 host 与 K230 交叉构建下作为静态库编译通过（2026-10-13：
-`bash .script/build-rtos --host` 与 `bash .script/build-rtos dart_vision`）。
+`bash .script/build-rtos --host` 与 `bash .script/build-rtos dart_app`）。
 实际识别质量、耗时和 DMA/流水线行为仍待板端验证。

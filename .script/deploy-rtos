@@ -3,9 +3,9 @@
 # deploy-rtos —— 把编译产物上板到 /sdcard/app/
 #
 # 用法:
-#   deploy-rtos              上板全部：launcher + dart_vision + startup_final.list
+#   deploy-rtos              上板全部：launcher + dart_app + startup_final.list
 #   deploy-rtos launcher     只上板 launcher
-#   deploy-rtos dart_vision  只上板 dart_vision
+#   deploy-rtos dart_app     只上板 dart_app
 #   deploy-rtos list         只上板启动清单（startup_final.list）
 #   deploy-rtos --keep-logs  全量读卡器部署时保留日志和录像
 #   deploy-rtos -h           本帮助
@@ -39,22 +39,22 @@ for arg in "$@"; do
     case "${arg}" in
     -h | --help) usage; exit 0 ;;
     --keep-logs) KEEP_LOGS=1 ;;
-    launcher | dart_vision | list)
+    launcher | dart_app | list)
         [[ -z "${TARGET}" ]] || die "只能指定一个目标"
         TARGET="${arg}"
         ;;
-    *) usage >&2; die "未知参数: ${arg}（可选 launcher | dart_vision | list | --keep-logs）" ;;
+    *) usage >&2; die "未知参数: ${arg}（可选 launcher | dart_app | list | --keep-logs）" ;;
     esac
 done
 
 # 统一选择和预检文件，三种传输方式使用同一套路径。
 NAMES=()
 SOURCES=()
-for name in launcher dart_vision list; do
+for name in launcher dart_app list; do
     [[ -z "${TARGET}" || "${TARGET}" == "${name}" ]] || continue
     if [[ "${name}" == list ]]; then
         NAMES+=(startup_final.list)
-        SOURCES+=("${REPO_ROOT}/src/launcher/startup.list")
+        SOURCES+=("${REPO_ROOT}/runtime/launcher/startup.list")
     else
         NAMES+=("${name}")
         SOURCES+=("$(rtos_artifact_path "${name}")")
@@ -178,4 +178,4 @@ fi
 info "部署完成；请重启板子以加载新文件（读卡器模式先卸载 SD 卡再插回板子）"
 info "板端手动验证（不要与 launcher 同时跑，两者都独占 VICAP）:"
 info "  msh> ${BOARD_DIR}/launcher -t"
-info "  msh> ${BOARD_DIR}/dart_vision --seconds 10"
+info "  msh> ${BOARD_DIR}/dart_app --seconds 10"

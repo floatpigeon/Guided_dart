@@ -1,6 +1,7 @@
 # Camera ACL
 
-> Layout follows librmcs: `camera.hpp` / `error.*` / `error_codes.h` are the
+> Layout follows librmcs: `frame_view.hpp` contains public L3 frame values;
+> `camera.hpp` / `error.*` / `error_codes.h` are the
 > platform-free interface and error layers, `c_api/` is the C ABI plus its
 > platform-free implementations, and `k230/` is the only place that may include
 > SDK headers or the C ABI. The current C boundary is
@@ -16,6 +17,11 @@ DMA cache synchronization. The C++ control plane exposes `ICamera`
 Only the C data-plane implementation includes K230 or POSIX device/runtime headers. There is no
 host implementation of MPP: host builds compile pure configuration, exposure
 calculation and lease logic only.
+
+L4 detectors include only `camera/frame_view.hpp` and depend on the header-only
+`dart_camera_types` target. It supplies no device code, SDK include paths or
+platform link flags. The application composition root selects `dart_camera_acl`
+and the concrete K230 camera.
 
 ## Exposure
 

@@ -3,15 +3,16 @@
 `dart::recorder::Recorder` 是本轮的录像垂直切片。它只接收相机 ACL 的
 `FrameLease`，不包含 K230、MPP 或 VENC 头文件；输入帧在线程中拷贝为紧凑
 Y8，再写成 PGM（或阈值打包后的 PBM）。硬件 H.264 需要后续独立的 video ACL，
-不会把厂商句柄带入这个上层模块。
+不会把厂商句柄带入这个运行时服务。本模块包含线程管理和具体文件系统操作，
+放在 `runtime/`；L4 算法不依赖它。构建目标在 `runtime/CMakeLists.txt` 中声明。
 
 ## 消费方式（二选一，不能同时）
 
 `recorder.cpp` 把声明与实现合并在一个带包含保护的翻译单元里，**没有**
 `recorder.hpp`，因此：
 
-- **include 方式**（当前唯一已落地消费者 `src/vision/main.cpp`）：
-  `#include "src/recordor/recorder.cpp"`，**不要**再链接 `dart_recording`，否则重复定义。
+- **include 方式**（当前唯一已落地消费者 `app/application.cpp`）：
+  `#include "runtime/recordor/recorder.cpp"`，**不要**再链接 `dart_recording`，否则重复定义。
 - **链接方式**：链接 `dart_recording`（别名 `dart_recorder`）。这条路径目前没有头文件
   可包含，需要先补一个声明头。
 
@@ -30,7 +31,7 @@ if (acquired && acquired->status == dart::camera::AcquireStatus::kFrame) {
 ```
 
 `Config::fps` 是目标录像帧率，默认 `30` 表示每秒选取 30 张，与采集帧率独立。
-`dart_vision --rec-fps N` 把它注入 Recorder；未指定时沿用 `Config::fps` 的默认值。
+`dart_app --rec-fps N` 把它注入 Recorder；未指定时沿用 `Config::fps` 的默认值。
 原 `sample_every_n` / `--rec-every` 已由这个参数替代。
 采样使用 `FrameView::received` 的单调微秒时间，每个 `1/fps` 时间区间最多选一帧，
 不依赖未经验证的源 PTS。时间区间先于队列检查，采集停顿或队列忙后不突发补帧，

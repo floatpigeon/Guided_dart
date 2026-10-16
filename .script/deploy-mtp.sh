@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 将交叉编译产物经 GIO/MTP 写入板端 /sdcard/app，保留日志、录像和旧文件备份。
-# 用法：bash .script/deploy-mtp.sh <存储根 URI 或 app URI> [--only launcher|dart_vision|list]
+# 用法：bash .script/deploy-mtp.sh <存储根 URI 或 app URI> [--only launcher|dart_app|list]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
-case "${ONLY}" in ''|launcher|dart_vision|list) ;; *) echo '无效的 --only 目标' >&2; exit 2 ;; esac
+case "${ONLY}" in ''|launcher|dart_app|list) ;; *) echo '无效的 --only 目标' >&2; exit 2 ;; esac
 case "${DEST}" in gphoto2://*|mtp://*) ;; *) echo '需要 gphoto2:// 或 mtp:// 存储 URI' >&2; exit 2 ;; esac
 DEST="${DEST%/}"
 if [[ "${DEST##*/}" == app ]]; then
@@ -42,11 +42,11 @@ fi
 
 NAMES=()
 SOURCES=()
-for name in launcher dart_vision list; do
+for name in launcher dart_app list; do
     [[ -z "${ONLY}" || "${ONLY}" == "${name}" ]] || continue
     if [[ "${name}" == list ]]; then
         NAMES+=(startup_final.list)
-        SOURCES+=("${REPO_ROOT}/src/launcher/startup.list")
+        SOURCES+=("${REPO_ROOT}/runtime/launcher/startup.list")
     else
         NAMES+=("${name}")
         SOURCES+=("$(rtos_artifact_path "${name}")")

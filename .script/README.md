@@ -4,9 +4,9 @@
 
 | 命令 | 作用 | 参数 |
 |---|---|---|
-| `build-rtos` | 交叉编译板端可执行文件 | `-r`（清 build-cross 重编）/ `--host`（host 编译检查）/ `launcher` / `dart_vision` |
-| `deploy-rtos` | 把产物上板到 `/sdcard/app/` | `launcher` / `dart_vision` / `list`（只推清单）；可加 `--keep-logs` |
-| `clean-rtos` | 清除板端内容（**保留目录本身**；固件自带的 `examples/` 默认不动） | `launcher` / `dart_vision` / `list` / `logs` / `records` / `examples` |
+| `build-rtos` | 交叉编译板端可执行文件 | `-r`（清 build-cross 重编）/ `--host`（host 编译检查）/ `launcher` / `dart_app` |
+| `deploy-rtos` | 把产物上板到 `/sdcard/app/` | `launcher` / `dart_app` / `list`（只推清单）；可加 `--keep-logs` |
+| `clean-rtos` | 清除板端内容（**保留目录本身**；固件自带的 `examples/` 默认不动） | `launcher` / `dart_app` / `list` / `logs` / `records` / `examples` |
 
 要让上面三个名字能**直接敲**（不带 `./`、不带路径），先跑一次 `install-rtos`：
 
@@ -19,7 +19,7 @@ bash .script/install-rtos --both     # 一次性；详见下面"怎么直接敲 
 
 ```bash
 deploy-rtos
-deploy-rtos dart_vision   # 只部署 dart_vision
+deploy-rtos dart_app   # 只部署 dart_app
 ```
 
 需要指定其它板子或使用 `clean-rtos` 时，可通过环境变量或 `.script/board.env` 配置：
@@ -88,7 +88,7 @@ build-rtos -r                         # 之后直接敲，不再需要任何前�
 
 ```bash
 bash .script/install-rtos --both   # 只做一次：之后下面这些命令直接敲，不带 ./
-build-rtos                  # 增量编译 launcher + dart_vision
+build-rtos                  # 增量编译 launcher + dart_app
 build-rtos -r               # 改了 CMake / 换工具链后全量重编
 deploy-rtos                 # 上板：两个 ELF + startup_final.list
 clean-rtos                  # 清空 /sdcard/app 下全部内容（目录与固件的 examples/ 保留）
@@ -123,7 +123,7 @@ clean-rtos records          # 只清录像，保留 ELF 和清单
 
 ```bash
 DART_BUILD_DIR=/tmp/dart-cross build-rtos
-DART_BUILD_DIR=/tmp/dart-cross deploy-rtos dart_vision
+DART_BUILD_DIR=/tmp/dart-cross deploy-rtos dart_app
 SDCARD="/media/$USER/SDCARD" deploy-rtos --keep-logs
 bash .script/check-camera-pool.sh
 ```

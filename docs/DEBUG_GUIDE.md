@@ -1,6 +1,6 @@
 # 板端调试手册（v2 工作流）
 
-状态：可执行的调试手册。当前仓库已有可部署 ELF（`launcher`、`dart_vision`）与
+状态：可执行的调试手册。当前仓库已有可部署 ELF（`launcher`、`dart_app`）与
 构建/部署脚本，启动链路见 [`LAUNCHER_DESIGN.md`](LAUNCHER_DESIGN.md)。
 **板端尚未验证**：凡本文档中的板端结论都必须以真实串口日志与样本为准。
 
@@ -10,13 +10,13 @@
 
 部署前必须满足：
 
-- 应用目录有自己的入口与在 `src/CMakeLists.txt` 中声明的目标；
+- 应用目录 `app/` 有自己的入口与在 `app/CMakeLists.txt` 中声明的目标；
 - `bash scripts/build.sh <目标名>` 能生成 ELF；
 - 交叉构建、链接脚本（SDK `link.lds`）和 SDK 依赖明确；
 - 版本化参数和日志 schema 已写入应用配置；
 - 板端有安全的停止/回收路径（`--seconds` 或 SIGINT/SIGTERM，退出逐 step 留日志）。
 
-当前可直接部署的两个目标：`launcher`（自启器）、`dart_vision`（识别+录像 payload）。
+当前可直接部署的两个目标：`launcher`（进程启动与监督）、`dart_app`（业务应用，当前接入采集、识别和录像）。
 板端 msh 里的第一步永远是 `/sdcard/app/launcher -t`（只校验清单，不启动进程）。
 
 ## 1. 排查顺序
@@ -32,7 +32,7 @@
 ## 2. 构建与部署
 
 ```bash
-bash scripts/build.sh --all                    # -> build-cross/{launcher,dart_vision}/...
+bash scripts/build.sh --all                    # -> build-cross/{launcher,dart_app}/...
 bash scripts/deploy.sh --all <板子IP> --list    # scp + md5 校验（有网络时首选）
 bash scripts/deploy-sdcard.sh /media/$USER/<卡> # 无网络：读卡器直写
 bash scripts/deploy-sdcard.sh 'gphoto2://Kendryte_CanMV_001000000/store_ffff0001'  # 板子用 USB 挂着（MTP）
@@ -103,9 +103,9 @@ ts_ms level module op code native detail action count msg="..."
 
 ## 7. 录像与取证
 
-当前 v2 的录像**只有灰度取证**：`src/recordor` 把帧拷成紧凑 Y8 后写
+当前 v2 的录像**只有灰度取证**：`runtime/recordor` 把帧拷成紧凑 Y8 后写
 `records/rec_NNNN/img/frame_XXXXXXXX.pgm`（或按阈值打包的 `.pbm`），并在
-`records/rec_NNNN/logs/frames.csv` 每帧一行记录放行决定；`dart_vision` 另外写
+`records/rec_NNNN/logs/frames.csv` 每帧一行记录放行决定；`dart_app` 另外写
 `records/detection.csv`（每帧的识别结果与扫描窗口）。硬件 H.264/VENC 在 v2 尚不存在。
 
 录像是异步数据面，不得阻塞采集或控制。记录帧号、源时间戳和是否重复，不能用图像哈希判断重复帧。队列满可以丢样本，但必须累计丢弃数（`rec_busy`/`event_dropped`）；写线程不在栈上放大对象，不逐包反复映射/解映射。

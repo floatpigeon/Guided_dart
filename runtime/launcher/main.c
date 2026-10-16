@@ -23,7 +23,7 @@
  *     '#' 开头或空行 -> 注释
  *     单行 <= 511 字符，token <= 31 个（路径 + 最多 31 个参数）
  *
- * 相对 v1 的四处硬化（v1 的现场证据见 src/launcher/startup.list 与
+ * 相对 v1 的四处硬化（v1 的现场证据见 runtime/launcher/startup.list 与
  * docs/LAUNCHER_DESIGN.md）：
  *   1) 不把 waitpid 当唯一判据：前台项用 WNOHANG + kill(pid,0) 轮询判断存活，
  *      waitpid 返回 ECHILD/异常时退化为"已消失(状态未知)"并继续，不会像 v1 那样

@@ -6,7 +6,7 @@
 #   clean-rtos              清空 /sdcard/app 下**全部**内容（目录本身保留；
 #                           固件自带的 examples/ 不动，见下面的"保留"说明）
 #   clean-rtos launcher     只删 /sdcard/app/launcher
-#   clean-rtos dart_vision  只删 /sdcard/app/dart_vision
+#   clean-rtos dart_app     只删 /sdcard/app/dart_app
 #   clean-rtos list         只删 /sdcard/app/startup_final.list
 #   clean-rtos logs         只清 /sdcard/app/logs/*（logs 目录保留）
 #   clean-rtos records      只清 /sdcard/app/records/*（records 目录保留）
@@ -40,14 +40,14 @@ case "${ARG}" in
     usage
     exit 0
     ;;
-'' | launcher | dart_vision | list | logs | records | examples) ;;
+'' | launcher | dart_app | list | logs | records | examples) ;;
 -*)
     usage >&2
     die "未知选项: ${ARG}"
     ;;
 *)
     usage >&2
-    die "未知目标: ${ARG}（可选 launcher | dart_vision | list | logs | records | examples）"
+    die "未知目标: ${ARG}（可选 launcher | dart_app | list | logs | records | examples）"
     ;;
 esac
 

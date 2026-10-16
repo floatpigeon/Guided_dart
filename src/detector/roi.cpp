@@ -7,7 +7,7 @@
 #include <expected>
 #include <limits>
 
-#include "camera/camera.hpp"
+#include "camera/frame_view.hpp"
 
 namespace dart::detection {
 namespace {

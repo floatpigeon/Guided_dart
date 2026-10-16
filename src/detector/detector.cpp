@@ -12,7 +12,7 @@
 #include <span>
 #include <utility>
 
-#include "camera/camera.hpp"
+#include "camera/frame_view.hpp"
 
 namespace dart::detection {
 namespace {

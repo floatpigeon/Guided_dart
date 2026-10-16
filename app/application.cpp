@@ -1,5 +1,9 @@
 /*
- * dart_vision —— 板端"识别 + 录像"单进程 payload
+ * dart_app —— 板端业务应用的组件组装与生命周期编排
+ *
+ * main.cpp 只提供进程入口；本文件负责配置解析、组件创建、运行调度与退出。
+ * 当前接入相机、识别和录像；后续 IMU、控制等任务也在这里组装，具体设备操作
+ * 和算法留在各自模块中，各任务按自己的时序运行。
  *
  * 为什么必须是单进程：相机 ACL 在 create() 里自建并独占 dart_media（全局 VB
  * 初始化 + VICAP/VB 池），同一时刻只允许一个消费者。v1 实测把同一程序在清单里
@@ -18,10 +22,12 @@
  *   -> camera.stop() -> camera 析构（deinit/destroy/media destroy）-> 摘要
  * 停止输入必须发生在 camera.stop() 之前；recorder 仍持租约时 stop 会返回 BUSY。
  *
- * 构建：bash .script/build-rtos dart_vision  ->  build-cross/dart_vision/dart_vision
+ * 构建：bash .script/build-rtos dart_app  ->  build-cross/dart_app/dart_app
  * 板端（先手动验证，再交给 launcher）：
- *   msh> /sdcard/app/dart_vision --seconds 10 --record on
+ *   msh> /sdcard/app/dart_app --seconds 10 --record on
  */
+#include "application.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -44,8 +50,9 @@
 #include "src/detector/detector.hpp"
 /* 录像模块把声明与实现合并在一个带包含保护的翻译单元里（没有 recorder.hpp），
  * 因此本应用采用 include 消费方式，链接时不要再加 dart_recording（会重复定义）。 */
-#include "src/recordor/recorder.cpp"
+#include "runtime/recordor/recorder.cpp"
 
+namespace dart::app {
 namespace {
 
 /* 本文件在匿名命名空间里工作，模块名一律用短别名；局部变量不得与别名同名
@@ -61,7 +68,7 @@ constexpr std::uint32_t kLeaseCapacity = 4;
 constexpr std::uint32_t kChannelBuffers = 6;
 constexpr std::uint32_t kCaptureBuffers = 4;
 
-constexpr std::string_view kDefaultLog = "/sdcard/app/logs/dart_vision.log";
+constexpr std::string_view kDefaultLog = "/sdcard/app/logs/dart_app.log";
 constexpr std::string_view kDefaultRecordDir = "/sdcard/app/records";
 
 volatile sig_atomic_t g_stop = 0;
@@ -178,7 +185,7 @@ void log_camera_error(Logger& log, const char* op, const char* action,
                       const camera::CameraError& error) noexcept
 {
     const auto& context = error.context();
-    log.line("level=ERROR module=vision op=%s code=%.*s native=%d detail=\"%.*s\" "
+    log.line("level=ERROR module=app op=%s code=%.*s native=%d detail=\"%.*s\" "
              "ctx_op=%.*s requested=%u observed=%u state=%u req_state=%u action=%s\n",
              op,
              static_cast<int>(error.category().size()), error.category().data(),
@@ -262,7 +269,7 @@ struct Args {
     bool pbm = false;
     char rec_dir[512] = "/sdcard/app/records";
     char det_csv[512] = ""; /* 空 = 关闭 */
-    char log_path[512] = "/sdcard/app/logs/dart_vision.log";
+    char log_path[512] = "/sdcard/app/logs/dart_app.log";
     std::uint32_t status_ms = 1000;
     std::uint32_t acquire_ms = 200;
     std::uint32_t max_acquire_errors = 8;
@@ -557,7 +564,7 @@ struct StageTiming {
 
     double average_us() const noexcept
     {
-        return samples > 0 ? static_cast<double>(total_us) / samples : 0.0;
+        return samples > 0 ? static_cast<double>(total_us) / static_cast<double>(samples) : 0.0;
     }
 };
 
@@ -645,26 +652,26 @@ void drain_releases(recorder::Recorder& rec, Logger& log) noexcept
 {
     for (int attempt = 0; attempt < 500; ++attempt) {
         if (rec.pending_releases() == 0) {
-            log.line("level=INFO module=vision op=shutdown step=leases_drained "
+            log.line("level=INFO module=app op=shutdown step=leases_drained "
                      "pending=0\n");
             return;
         }
         (void)rec.drain_releases();
         sleep_ms(10);
     }
-    log.line("level=WARN module=vision op=shutdown step=leases_drained pending=%u "
+    log.line("level=WARN module=app op=shutdown step=leases_drained pending=%u "
              "action=continue note=drain_incomplete\n",
              rec.pending_releases());
 }
 
-int run(const Args& args) noexcept
+int run_application(const Args& args) noexcept
 {
     Logger log;
     if (!log.open(args.log_path)) {
         ensure_parent(args.log_path);
         (void)log.open(args.log_path);
     }
-    log.line("level=INFO module=vision op=start version=2 acq=%ux%u@%u out=%ux%u "
+    log.line("level=INFO module=app op=start version=2 acq=%ux%u@%u out=%ux%u "
              "csi=%u mirror=%u exposure=%s exp_us=%u vision=%d record=%d "
              "rec_fps=%u rec_keep=%u rec_format=%s rec_dir=%s threshold=%u seconds=%u "
              "log=%s\n",
@@ -702,7 +709,7 @@ int run(const Args& args) noexcept
         return 1;
     }
     std::unique_ptr<camera::ICamera> cam = std::move(created.value());
-    log.line("level=INFO module=vision op=camera_create result=ok capacity=%u "
+    log.line("level=INFO module=app op=camera_create result=ok capacity=%u "
              "sensor=%ux%u@%u out=%ux%u exposure=%s applied_us=%u\n",
              cam->capacity(), cam->caps().sensor_width, cam->caps().sensor_height,
              cam->caps().sensor_fps, cam->caps().output_width,
@@ -721,12 +728,12 @@ int run(const Args& args) noexcept
     if (args.vision_on) {
         auto prepared = detector.Prepare(max_width, max_height);
         if (!prepared) {
-            log.line("level=ERROR module=vision op=detector_prepare code=%d "
+            log.line("level=ERROR module=app op=detector_prepare code=%d "
                      "max=%ux%u action=exit\n",
                      static_cast<int>(prepared.error()), max_width, max_height);
             return 1;
         }
-        log.line("level=INFO module=vision op=detector_prepare result=ok max=%ux%u "
+        log.line("level=INFO module=app op=detector_prepare result=ok max=%ux%u "
                  "threshold=%u\n",
                  max_width, max_height, args.threshold);
     }
@@ -745,11 +752,11 @@ int run(const Args& args) noexcept
 
     CsvWriter csv;
     if (args.det_csv[0] != '\0' && !csv.open(args.det_csv)) {
-        log.line("level=WARN module=vision op=csv_open result=failed path=%s "
+        log.line("level=WARN module=app op=csv_open result=failed path=%s "
                  "action=continue\n",
                  args.det_csv);
     } else if (args.det_csv[0] != '\0') {
-        log.line("level=INFO module=vision op=csv_open result=ok path=%s\n",
+        log.line("level=INFO module=app op=csv_open result=ok path=%s\n",
                  args.det_csv);
     }
 
@@ -759,14 +766,14 @@ int run(const Args& args) noexcept
         csv.close();
         return 1;
     }
-    log.line("level=INFO module=vision op=camera_start result=ok state=%u\n",
+    log.line("level=INFO module=app op=camera_start result=ok state=%u\n",
              static_cast<unsigned>(cam->state()));
 
     if (args.record_on) {
         /* Recorder 只会单层 mkdir 自己的根目录；父目录（如 /sdcard/app）由这里兜底。 */
         ensure_dir(args.rec_dir);
         if (!rec.start()) {
-            log.line("level=ERROR module=vision op=recorder_start result=failed "
+            log.line("level=ERROR module=app op=recorder_start result=failed "
                      "code=%s system_errno=%d path=%s action=stop_input\n",
                      recorder::Recorder::error_text(rec.last_error()).data(),
                      rec.last_system_error(), rec.last_error_path());
@@ -775,7 +782,7 @@ int run(const Args& args) noexcept
             return 1;
         }
         const auto stats = rec.stats();
-        log.line("level=INFO module=vision op=recorder_start result=ok dir=%s fps=%u "
+        log.line("level=INFO module=app op=recorder_start result=ok dir=%s fps=%u "
                  "queued=%u\n",
                  args.rec_dir, recorder_config.fps, stats.queued);
     }
@@ -805,7 +812,7 @@ int run(const Args& args) noexcept
             log_camera_error(log, "camera_acquire", "retry",
                              *acquired.error());
             if (consecutive_acquire_errors >= args.max_acquire_errors) {
-                log.line("level=ERROR module=vision op=camera_acquire "
+                log.line("level=ERROR module=app op=camera_acquire "
                          "result=abort consecutive=%u limit=%u\n",
                          consecutive_acquire_errors, args.max_acquire_errors);
                 break;
@@ -841,7 +848,7 @@ int run(const Args& args) noexcept
             detect_timing.observe(detect_begin);
             if (!detected) {
                 counters.detect_errors++;
-                log.line("level=WARN module=vision op=detect code=%d sequence=%llu "
+                log.line("level=WARN module=app op=detect code=%d sequence=%llu "
                          "action=skip_frame\n",
                          static_cast<int>(detected.error()),
                          static_cast<unsigned long long>(view.sequence));
@@ -900,7 +907,7 @@ int run(const Args& args) noexcept
                                         .count();
             const auto stats = rec.stats();
             log.begin_batch();
-            log.line("level=INFO module=vision op=status elapsed_s=%lld frames=%llu "
+            log.line("level=INFO module=app op=status elapsed_s=%lld frames=%llu "
                      "fps=%.1f no_frame=%llu lease_exhausted=%llu target=%llu "
                      "detect_err=%llu rec_input=%llu rec_acc=%llu rec_down=%llu "
                      "rec_busy=%llu rec_queued=%u rec_pending=%u rec_written=%llu "
@@ -926,7 +933,7 @@ int run(const Args& args) noexcept
                      detector.run_high_water());
             const auto window_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 telemetry_begin - timing_begin).count();
-            log.line("level=INFO module=vision op=timing window_ms=%lld fps=%.1f "
+            log.line("level=INFO module=app op=timing window_ms=%lld fps=%.1f "
                      "acquire_us=%.1f acquire_max_us=%llu detect_us=%.1f detect_max_us=%llu "
                      "pipeline_us=%.1f pipeline_max_us=%llu telemetry_us=%.1f "
                      "telemetry_max_us=%llu note=acquire_includes_wait\n",
@@ -955,14 +962,14 @@ int run(const Args& args) noexcept
     }
 
     /* ---------------- 收尾：停止输入 → 停消费者 → 排空 → 摘要 → 释放 SDK ---- */
-    log.line("level=INFO module=vision op=shutdown step=input_stop reason=%s "
+    log.line("level=INFO module=app op=shutdown step=input_stop reason=%s "
              "frames=%llu\n",
              g_stop != 0 ? "signal" : (exit_by_deadline ? "deadline" : "abort"),
              static_cast<unsigned long long>(counters.frames));
 
     if (args.record_on) {
         rec.stop();
-        log.line("level=INFO module=vision op=shutdown step=recorder_stopped "
+        log.line("level=INFO module=app op=shutdown step=recorder_stopped "
                  "pending=%u\n",
                  rec.pending_releases());
     }
@@ -973,13 +980,13 @@ int run(const Args& args) noexcept
         if (!stopped) {
             log_camera_error(log, "camera_stop", "destroy_anyway", *stopped.error());
         } else {
-            log.line("level=INFO module=vision op=shutdown step=camera_stopped "
+            log.line("level=INFO module=app op=shutdown step=camera_stopped "
                      "result=ok\n");
         }
     }
 
     const auto stats = rec.stats();
-    log.line("level=INFO module=vision op=shutdown step=summary frames=%llu "
+    log.line("level=INFO module=app op=shutdown step=summary frames=%llu "
              "no_frame=%llu lease_exhausted=%llu acquire_errors=%llu "
              "target_hits=%llu detect_calls=%llu detect_errors=%llu "
              "rec_accepted=%llu rec_downsampled=%llu rec_busy=%llu rec_invalid=%llu "
@@ -1010,19 +1017,19 @@ int run(const Args& args) noexcept
     csv.close();
 
     cam.reset(); /* deinit -> destroy -> media destroy */
-    log.line("level=INFO module=vision op=shutdown step=camera_destroyed result=ok\n");
-    log.line("level=INFO module=vision op=exit result=done\n");
+    log.line("level=INFO module=app op=shutdown step=camera_destroyed result=ok\n");
+    log.line("level=INFO module=app op=exit result=done\n");
     return 0;
 }
 
 } // namespace
 
-int main(int argc, char* argv[])
+int run(int argc, char* argv[]) noexcept
 {
     auto args = parse_args(argc, argv);
     if (!args)
         return args.error();
-    const int result = run(args.value());
+    const int result = run_application(args.value());
     const char* marker = std::getenv("DART_EXIT_MARKER");
     if (marker != nullptr && marker[0] == '/' && std::strlen(marker) < 512) {
         const int fd = ::open(marker, O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -1039,3 +1046,5 @@ int main(int argc, char* argv[])
     }
     return result;
 }
+
+} // namespace dart::app

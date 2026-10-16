@@ -8,6 +8,7 @@
 #include <span>
 
 #include "camera/error.hpp"
+#include "camera/frame_view.hpp"
 
 namespace dart::camera {
 
@@ -60,23 +61,6 @@ struct Config {
     ExposureMode exposure_mode = ExposureMode::kFixed;
     std::uint32_t initial_exposure_us = 0;
     std::uint32_t mirror = 0;
-};
-
-struct FrameView {
-    std::span<const std::byte> luma{};
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    std::uint32_t stride = 0;
-    std::uint64_t source_pts = 0;
-    /* Frame identity: the lease token, stamped when a slot is reserved. Later
-     * stages need it to name evidence, to correlate a detection result with the
-     * frame that produced it, and to spot gaps. A gap means that acquisition
-     * attempt produced no frame (E_NO_FRAME); a drop for lack of capacity
-     * consumes nothing, because the driver is never touched.
-     */
-    std::uint64_t sequence = 0;
-    bool source_pts_timebase_validated = false;
-    std::chrono::microseconds received{};
 };
 
 enum class AcquireStatus : std::uint8_t {

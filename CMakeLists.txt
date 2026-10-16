@@ -3,8 +3,9 @@ cmake_minimum_required(VERSION 3.20)
 # ============================================================================
 # K230D / K230 RT-Smart 用户态业务应用仓库（与固件无关）
 #
-# 业务代码统一放在 apps/<应用名>/ 目录下，每个子目录编译为一个
-# 可在板端 RT-Smart 中直接运行的可执行程序（ELF）。
+# src/ 只放 L4 领域算法；include/ 声明 L3/L2 库，runtime/ 放运行时服务，
+# app/ 是应用组合根。各目录的 CMakeLists.txt 分别声明本目录目标。
+# 业务应用 dart_app 与进程启动器 launcher 分别生成 RT-Smart 可执行程序（ELF）。
 #
 # 构建方式（交叉编译，目标 rv64imafdcv / lp64d，musl 静态链接）：
 #   bash .script/build-rtos
@@ -84,21 +85,18 @@ target_link_options(k230_rtos_app INTERFACE
     -Wl,--gc-sections)
 
 # ---------------------------------------------------------------------------
-# 收集 apps/ 下所有业务应用（每个子目录 = 一个板端可执行程序）
+# 按依赖方向声明公共抽象/设备库、L4 领域、运行时服务和应用组合根
 # ---------------------------------------------------------------------------
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals/CMakeLists.txt")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals")
 endif()
 # include/ 下集中声明全部固件侧库目标（camera / spi / imu …）；
 # 模块子目录只放源码，不再各自持有 CMakeLists.txt。
+find_package(Threads REQUIRED)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src")
-file(GLOB _app_dirs CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/apps/*")
-foreach(_dir IN LISTS _app_dirs)
-  if(IS_DIRECTORY "${_dir}" AND EXISTS "${_dir}/CMakeLists.txt")
-    add_subdirectory("${_dir}")
-  endif()
-endforeach()
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/runtime")
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/app")
 
 message(STATUS "K230_SDK_ROOT        = ${K230_SDK_ROOT}")
 message(STATUS "K230_TOOLCHAIN_DIR   = ${K230_TOOLCHAIN_DIR}")

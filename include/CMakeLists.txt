@@ -20,6 +20,12 @@ set(_imu_dir "${_dart_src}/imu")
 # ---------------------------------------------------------------------------
 option(DART_CAMERA_K230 "Build the K230 camera data plane and C++ adapter" OFF)
 
+# L3 frame value types only: no compiled camera code, SDK headers or link flags.
+# L4 detectors consume this target; the composition root selects the camera ACL.
+add_library(dart_camera_types INTERFACE)
+target_compile_features(dart_camera_types INTERFACE cxx_std_23)
+target_include_directories(dart_camera_types INTERFACE "${_dart_src}")
+
 # Keep the target helper strict: every enabled target must contain real sources.
 # An interface fallback is retained only for optional targets that are disabled
 # by configuration; no placeholder translation units are generated.
@@ -120,6 +126,7 @@ if(DART_CAMERA_K230)
 endif()
 _dart_camera_add_library(dart_camera_acl ${_acl_sources})
 target_compile_features(dart_camera_acl ${dart_camera_acl_scope} cxx_std_23)
+target_link_libraries(dart_camera_acl ${dart_camera_acl_scope} dart_camera_types)
 target_link_libraries(dart_camera_acl ${dart_camera_acl_scope} dart_camera_core)
 if(DART_CAMERA_K230)
     target_link_libraries(dart_camera_acl ${dart_camera_acl_scope} dart_camera_k230)

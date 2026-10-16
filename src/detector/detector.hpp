@@ -7,10 +7,14 @@
 #include <memory>
 #include <span>
 
-#include "camera/camera.hpp"
+#include "camera/frame_view.hpp"
 
 // Vision consumers include this header and link detector.cpp and roi.cpp.
 namespace dart::detection {
+
+class LED_Detector {};
+class Armor_Detector {};
+class Roi_Detector {};
 
 // Geometry uses full-image pixel coordinates. Right/bottom edges are exclusive.
 struct Point {

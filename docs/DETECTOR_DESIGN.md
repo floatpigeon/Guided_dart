@@ -1,6 +1,6 @@
 # 识别与跟踪设计基线
 
-状态：算法规格；实现尚未创建。本文面向后续实现 `src/vision/`、`src/detection/` 的 agent。板端流程见 [`DEBUG_GUIDE.md`](DEBUG_GUIDE.md)，C 化和迁移顺序见 [`VISION_C_REFACTOR_PLAN.md`](VISION_C_REFACTOR_PLAN.md)。
+状态：算法规格，含尚未落地的目标接口。当前检测实现在 `src/detector/`，应用组装在 `app/application.cpp`，相机资源管理在 `include/firmware/app/src/camera/`。板端流程见 [`DEBUG_GUIDE.md`](DEBUG_GUIDE.md)，C 化和迁移顺序见 [`VISION_C_REFACTOR_PLAN.md`](VISION_C_REFACTOR_PLAN.md)。
 
 ## 1. 两个工况
 
@@ -34,8 +34,8 @@
 
 | 模块 | 语言/目标位置 | 只负责 |
 |---|---|---|
-| 二值化 | C，`src/vision/binarize.c` | Y 平面和阈值到 0/255，检查 stride/边界 |
-| 帧池 | C，`src/vision/frame_pool.c` | 槽位状态、VB/MMZ 所有权、cache/DMA 契约 |
+| 二值化 | C，`src/detector/binarize.c`（规划，当前集成在 `detector.cpp`） | Y 平面和阈值到 0/255，检查 stride/边界 |
+| 帧池 | C，`include/firmware/app/src/camera/{c_api,k230}/` | 槽位状态、VB/MMZ 所有权、cache/DMA 契约 |
 | 全图扫描 | C，`src/detection/scanner/tile_scanner.c` | 瓦片统计、候选合并、Top-K |
 | ROI 测量 | C，`src/detection/measure/roi_measure.c` | 窗口内连通域、质心、面积、形状质量 |
 | 几何纯函数 | C，`src/detection/geometry/*.c` | POD 输入输出，不读全局状态 |

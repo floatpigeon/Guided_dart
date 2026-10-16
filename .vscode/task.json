@@ -35,8 +35,8 @@
       "id": "appName",
       "type": "pickString",
       "description": "板端可执行目标",
-      "options": ["dart_vision", "launcher"],
-      "default": "dart_vision"
+      "options": ["dart_app", "launcher"],
+      "default": "dart_app"
     },
     {
       "id": "boardIp",

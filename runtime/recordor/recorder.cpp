@@ -2,7 +2,7 @@
  * 拷贝为紧凑 Y8，再写成 PGM（或阈值打包后的 PBM）。硬件 H.264 需要后续独立的
  * video ACL，不会把厂商句柄带入这个上层模块。
  *
- * 与 detection 模块一致，本文件自带重复包含保护：应用既可以 #include 本 .cpp
+ * 本文件自带重复包含保护：应用既可以 #include 本 .cpp
  * 直接引入完整实现，也可以链接单独编译本文件的 dart_recording 目标。
  */
 #ifndef DART_RECORDING_RECORDER_CPP

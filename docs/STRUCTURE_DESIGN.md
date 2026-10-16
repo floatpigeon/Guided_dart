@@ -51,21 +51,33 @@ L1  BSP/HAL/MPP（厂商 C）
 
 ## 3. 目录职责
 
-实际布局（2026-10 更新，**不使用 `apps/` 目录**：可执行与库目标统一在
-`src/CMakeLists.txt` 声明，模块子目录只放源码与 README）：
+实际布局（2026-10 更新）：`src/` 严格保持为 L4；应用组装与具体运行时实现
+放在独立目录，各目录的 `CMakeLists.txt` 分别声明本目录目标。
 
 ```
-src/                        业务实现（C++ 编排 + C 热路径实现）
+src/                        L4 领域与策略，只依赖 L3 公开数据或抽象接口
   detector/                 检测 + ROI（dart_detection，STATIC；detector.cpp + roi.cpp）
-  recordor/                 灰度取证录像（dart_recording；单翻译单元 recorder.cpp）
-  launcher/                 开机自启器（平台无关 C11）+ startup.list 清单母版
-  vision/                   组合根：相机 + 识别 + 录像单进程 payload（dart_vision）
   control/                  目标：C++ 观测器、状态机、外环/内环和分配
-include/                    与 src 对应的公共接口 + 固件侧库目标声明（camera/spi/imu）
+app/                        应用组合根，可以选择具体设备和运行时实现
+  main.cpp                  业务进程入口（dart_app）
+  application.hpp/.cpp       应用编排：配置、组件组装、运行调度和退出
+  README.md                 应用参数、运行流水线和退出契约
+runtime/                    具体运行时服务与进程管理，L4 不依赖本目录
+  recordor/                 录像线程、PGM/PBM/CSV 文件写入（dart_recording）
+  launcher/                 开机自启器（平台无关 C11）+ startup.list 清单母版
+include/                    L3 公开类型/设备抽象与 L2/C 实现（camera/spi/imu）
 cmake/                      交叉工具链配置（链接脚本取 SDK 的 libs/mk/link.lds）
-scripts/                    构建（build.sh）与部署（deploy.sh / deploy-sdcard.sh）
+.script/                    构建、部署、清理与回归检查
 docs/                       设计、标定、调试和验收契约
 ```
+
+`src/` 不包含 K230 工厂、POSIX 线程/文件操作、main 或进程管理。检测器只包含
+`camera/frame_view.hpp`，通过头文件目标 `dart_camera_types` 获取帧数据类型，
+不链接 `dart_camera_acl` 或 K230 后端。设备实现由 `app/` 明确选择。
+
+应用组合根负责相机、IMU、识别、录像、控制等组件的组装和生命周期，具体实现仍在
+各自模块；IMU 采样和控制任务按各自频率运行，不随相机逐帧循环调度。它不新增
+领域分层；launcher 负责进程监督，application 负责进程内部的组件编排。
 
 启动链路的完整设计（清单语义、所有权、日志布局、v1 教训）见
 [`LAUNCHER_DESIGN.md`](LAUNCHER_DESIGN.md)。
@@ -112,9 +124,9 @@ VICAP/传感器（ACL）
 
 ## 7. 禁止事项
 
-- 不恢复 v1 的 `apps/` 单一工程布局：可执行目标在 `src/CMakeLists.txt` 声明，模块
-  子目录只放源码；也不要把 v1 的 `self_guiding_dart` 整体搬回来。
-- 不要出现第二个持有 VICAP/VB 的进程：识别与录像必须在 `src/vision` 这一个 ELF 内
+- 不把应用入口、组件工厂、线程/文件实现或进程管理放进 L4 的 `src/`；不把具体
+  相机实现作为领域库的依赖。也不要把 v1 的 `self_guiding_dart` 整体搬回来。
+- 不要出现第二个持有 VICAP/VB 的进程：识别与录像必须在 `dart_app` 这一个 ELF 内
   串联（v1 实测多实例抢资源必死），清单里也不能放第二条 payload。
 - 不要把外部仓库（包括 v1 或 RMCS）当作本仓库的依赖；只提炼设计原则并在本仓上下文重写。
 - 不要用主机兼容层伪造 MPP/VICAP/VENC 行为；硬件假设要由 ACL 和板端探针验证。

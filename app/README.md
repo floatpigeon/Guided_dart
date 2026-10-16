@@ -1,16 +1,23 @@
-# dart_vision —— 板端"识别 + 录像"单进程 payload
+# dart_app —— 板端业务应用
 
-本目录只有 `main.cpp`：它是**组合根**，把相机 ACL（`dart_camera_acl`）、识别
-（`src/detector`）、录像（`src/recordor`）接成一条按序流水线。它不属于任何一层
-领域逻辑，因此除了"解析参数、串行化调用、写日志/CSV、按契约收尾"之外不做别的。
+`main.cpp` 提供业务进程入口，调用 `application.hpp` 声明的 `dart::app::run()`。
+`application.cpp` 是应用的**组合根**：解析配置、创建组件、连接依赖、安排运行和
+退出顺序。当前接入相机 ACL（`dart_camera_acl`）、识别（`src/detector`）和录像
+（`runtime/recordor`）；后续 IMU、控制与执行器也由这里组装，各自实现留在对应模块。
 
-## 为什么必须是单进程
+本目录是应用组合根，可以选择具体设备和运行时实现。`src/` 保持为 L4 领域，
+只消费公开数据或抽象接口；`runtime/launcher/` 负责进程启动与监督，
+`runtime/recordor/` 负责录像线程与文件写入。应用负责进程内部的组件生命周期。
+单进程可以有多个线程或任务：当前相机调用保持串行，
+后续 IMU 采样和控制任务应按各自频率运行，不能依赖相机逐帧循环的进度。
+
+## 相机采集、识别与录像为什么放在同一个进程
 
 相机 ACL 在 `create()` 里自建并独占 `dart_media`（全局 VB 初始化 + VICAP/VB 私有
 输出池），同一时刻只允许一个消费者。v1 实测把同类程序在清单里放多条，5 个实例
 几乎同时抢 VB/VICAP，只有 9/28 次写出日志，其余静默死掉。因此：
 
-- 清单里**只能有一条** `dart_vision`；
+- 清单里**只能有一条** `dart_app`；
 - "识别"和"录像"在同一进程内完成，不做跨进程帧共享；
 - 手工调试时不要与 launcher 同时运行。
 
@@ -40,7 +47,7 @@ camera->acquire(timeout) -> FrameLease
 ## 参数
 
 ```
-dart_vision [选项]
+dart_app [选项]
   --seconds N      有界运行秒数，0 = 跑到 SIGINT/SIGTERM（默认 0）
   --acq WxH        传感器模式（默认 1920x1080）
   --fps N          传感器帧率（默认 30）
@@ -57,19 +64,19 @@ dart_vision [选项]
   --rec-dir DIR    录像根目录（默认 /sdcard/app/records）
   --det-csv PATH   识别结果 CSV；off 关闭（默认关闭）
   --threshold N    二值化阈值（默认 50）
-  --log PATH       结构化日志（默认 /sdcard/app/logs/dart_vision.log）
+  --log PATH       结构化日志（默认 /sdcard/app/logs/dart_app.log）
   --status-ms N    状态行间隔（默认 1000）
   --acquire-ms N   单次取帧超时（默认 200）
   --max-acquire-errors N  连续取帧错误上限，超过即退出（默认 8）
 ```
 
 **所有默认值都是 UNVALIDATED**：传感器模式必须精确命中（ACL 拒绝静默回退），
-曝光/阈值要用真实板端样本标定，见 [`docs/DEBUG_GUIDE.md`](../../docs/DEBUG_GUIDE.md) §5。
+曝光/阈值要用真实板端样本标定，见 [`docs/DEBUG_GUIDE.md`](../docs/DEBUG_GUIDE.md) §5。
 
 ## 输出
 
 ```
-/sdcard/app/logs/dart_vision.log                      结构化日志（状态与耗时两行共用一次 fsync，写完关闭文件）
+/sdcard/app/logs/dart_app.log                      结构化日志（状态与耗时两行共用一次 fsync，写完关闭文件）
 /sdcard/app/records/rec_NNNN/img/frame_XXXXXXXX.pgm   灰度取证图（或 .pbm）
 /sdcard/app/records/rec_NNNN/logs/frames.csv          每帧一行的放行记录（Recorder 写）
 /sdcard/app/records/detection.csv                     每帧一行的识别结果（本程序写）
@@ -82,7 +89,7 @@ dart_vision [选项]
 只进 CSV 与计数器：
 
 ```
-ts_ms=... level=INFO module=vision op=status elapsed_s=10 frames=298 fps=29.8 no_frame=2
+ts_ms=... level=INFO module=app op=status elapsed_s=10 frames=298 fps=29.8 no_frame=2
   lease_exhausted=0 target=37 detect_err=0 rec_input=298 rec_acc=75 rec_down=223 rec_busy=0
   rec_queued=1 rec_pending=0 rec_written=74 rec_event_dropped=0 release_err=0 run_hw=512
 ```
@@ -110,12 +117,15 @@ step=exit
 ## 构建与上板
 
 ```bash
-bash .script/build-rtos dart_vision          # -> build-cross/dart_vision/dart_vision
-msh> /sdcard/app/dart_vision --seconds 10 --record off     # 先只验证采集+识别
-msh> /sdcard/app/dart_vision --seconds 10                  # 再验证录像落盘
+bash .script/build-rtos dart_app          # -> build-cross/dart_app/dart_app
+msh> /sdcard/app/dart_app --seconds 10 --record off     # 先只验证采集+识别
+msh> /sdcard/app/dart_app --seconds 10                  # 再验证录像落盘
 ```
 
 ## 验证状态
+
+重命名后的 `dart_app` 需重新部署并验证板端自启；以下板端记录是迁移前流水线的
+历史验证结果。
 
 - 已通过（2026-10-15，CanMV 001000000 板端）：CSI2 上电自启、1920×1080 PGM
   完整回读、90 秒分段后的完成标记与自动重新启动、仅保留最近两轮。
