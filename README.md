@@ -1,93 +1,183 @@
-# K230D / K230 RT-Smart 业务代码仓库
+# K230D / K230 RT-Smart 业务代码仓库（v2）
 
 本仓库**与固件无关**：它面向 K230D RT-Smart 用户态业务代码的开发和部署。
+不编译、不烧录固件；板子上必须是已支持 RT-Smart 用户态（lwp）的固件，
+交叉编译出的静态 ELF 才能直接运行。
 
-> 相机 C 数据面、C++ 曝光虚接口和构建探针已落地，见 [`include/firmware/app/src/camera/README.md`](include/firmware/app/src/camera/README.md)。其余业务模块和下文的构建/部署脚本仍是目标工作流。先阅读 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)，不要把目标路径当成现有实现。
+已落地：相机 C 数据面 + C++ ACL（`include/firmware/app/src/camera/`）、IMU/SPI
+（`.../imu/`、`.../spi/`）、识别与 ROI（`src/detector/`）、灰度取证录像
+（`src/recordor/`）、单进程识别+录像 payload（`src/vision/`）、开机自启动器与清单
+（`src/launcher/`）、构建/部署脚本（`.script/`）。
+
+先读 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)（分层与依赖方向），
+启动链路读 [`docs/LAUNCHER_DESIGN.md`](docs/LAUNCHER_DESIGN.md)，
+板端调试读 [`docs/DEBUG_GUIDE.md`](docs/DEBUG_GUIDE.md)。
 
 工作流（官方文档同款流程，见
 [如何运行和新增 HelloWorld 应用](https://www.kendryte.com/k230_rtos/zh/v0.8/userguide/helloworld.html)）：
 
 ```
-编写业务代码 → 交叉编译出 ELF → scp 拷贝到板子 → 利用开机自启的跳板文件启动
+编写业务代码 → 交叉编译出 ELF → scp/读卡器拷到板子 → 利用开机自启的 launcher 启动
 ```
 
 ---
 
 ## 1. 业务代码放在哪里？（最重要）
 
-> 当前分支尚未创建具体业务应用；后续业务代码应放在 `src/`
-> 视觉、IMU、控制和录像模块。识别/跟踪的目标工况见 [`docs/DETECTOR_DESIGN.md`](docs/DETECTOR_DESIGN.md)，
-> 架构边界见 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)，板端调试模板见
-> [`docs/DEBUG_GUIDE.md`](docs/DEBUG_GUIDE.md)。
+**没有 `apps/` 目录**：可执行目标和库目标统一在 `src/CMakeLists.txt` 声明，模块
+子目录只放源码与 README（与 `include/CMakeLists.txt` 的约定一致）。
 
-- 目录结构与官方 SDK 的 `src/applications/<应用名>/` 一一对应：
-  本仓库用 CMake 独立编译，产物可直接拷板；需要打进固件镜像时，
-  把整个目录拷进 SDK 的 `src/applications/` 再用官方 `make` 流程即可，产物等价。
-- **新增应用（目标工作流）**：创建 `apps/my_app/`，补齐 `CMakeLists.txt` 和 `main.cpp`，再在顶层 CMake 注册它；当前分支尚未提供 `app_template`。
+| 目录 | 内容 | 目标 / 产物 |
+|---|---|---|
+| `src/launcher/` | 开机自启动器（纯 POSIX C11，平台无关）+ `startup.list` 母版 | `launcher` → `build-cross/launcher/launcher` |
+| `src/vision/` | 组合根：相机 + 识别 + 录像，**单进程** payload | `dart_vision` → `build-cross/dart_vision/dart_vision` |
+| `src/detector/` | 灯/装甲板检测与 ROI | `dart_detection`（静态库） |
+| `src/recordor/` | 灰度取证录像（PGM/PBM） | `dart_recording`（静态库） |
+| `include/firmware/app/src/camera/` | 相机 C 数据面 + C++ ACL | `dart_camera_core` / `dart_camera_k230` / `dart_camera_acl` |
+| `include/firmware/app/src/{imu,spi}/` | IMU 抽象/估计器 + SPI 驱动 + K230 适配器 | `dart_imu` / `dart_iim42622` / `dart_imu_k230` |
+| `.script/` | 构建、部署、板端清理和相机回归检查；`install-rtos` 可注册短命令 | — |
 
-> 你现有的/未来的业务代码（如传感器、算法、通信逻辑）都放在 `src/` 下。
+硬件资源是独占的：**同一时刻只能有一个进程持有 VICAP/VB**，所以"识别"和"录像"
+合在 `dart_vision` 一个 ELF 里，清单里也只能出现一条。详见
+[`docs/LAUNCHER_DESIGN.md`](docs/LAUNCHER_DESIGN.md) §5。
 
 ## 2. 目录结构
 
 ```
-SelfGuidingDart/
+dart/
 ├── cmake/
-│   ├── toolchain-riscv64-musl.cmake   # 交叉编译工具链配置（rv64imafdcv/lp64d）
-│   └── link.lds                       # RT-Smart 链接脚本（取自自定义 SDK）
-├── scripts/                    # 目标：构建/部署脚本（当前尚未创建）
-├── src/                         # 目标：业务实现（当前尚未创建）
-├── include/                     # 目标：公共接口
-├── docs/                        # 设计和验收契约
-├── .vscode/                     # VSCode 配置
-└── CMakeLists.txt               # 顶层构建骨架
+│   └── toolchain-riscv64-musl.cmake   # 交叉编译工具链配置（rv64imafdcv/lp64d）
+│                                      # 链接脚本用 SDK 的 src/rtsmart/libs/mk/link.lds
+├── .script/                           # 所有构建、部署和检查脚本
+│   ├── install-rtos                   # 一次性把 .script/ 追加进 ~/.bashrc / ~/.zshrc
+│   ├── build-rtos                     # 交叉编译（-r 重编 / <目标名> / --host）
+│   ├── deploy-rtos                    # 统一部署入口：SSH/scp、读卡器、USB/MTP
+│   ├── clean-rtos                     # 清空 /sdcard/app（保留目录本身）
+│   ├── _rtos-common.sh                # 构建/部署/清理共用的定位、环境与板端访问层
+│   ├── deploy-mtp.sh                  # USB/MTP：GIO 上传、备份和 SHA-256 回读校验
+│   ├── check-camera-pool.sh           # 相机资源池与生命周期的 host 回归检查
+│   ├── board.env.example              # 板子地址配置示例（board.env 已被 gitignore）
+│   └── README.md                      # 命令用法与依赖
+├── src/                               # 业务实现与可执行入口（见 §1 表格）
+├── include/                           # 公共接口 + 固件侧库目标声明
+├── docs/                              # 设计、调试与验收契约
+├── CMakePresets.json                  # host / cross 两个预设
+└── CMakeLists.txt                     # 顶层构建骨架
 ```
 
-## 3. 首次准备（一次性）
-
-> 本节命令是目标工作流；当前分支的 `scripts/` 尚未创建，首次实现应先补齐脚本并验证工具链。
+## 3. 工具链与 SDK（一次性）
 
 ```bash
-# 安装交叉工具链（riscv64-unknown-linux-musl-，约 108MB，装到仓库 third_party/）
-bash scripts/setup-toolchain.sh
+# 工具链：riscv64-unknown-linux-musl-gcc。build-rtos 会按以下顺序自动探测：
+#   $K230_TOOLCHAIN_DIR
+#   <仓库>/third_party/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin
+#   /mnt/mydata/SelfGuidingDart/third_party/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin
+#   /opt/toolchains/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin
+export K230_TOOLCHAIN_DIR=/path/to/riscv64-musl/bin     # 探测不到时显式指定
 ```
 
-环境要求：`cmake >= 3.20`、`ninja`、`scp`（部署用）。SDK 位于
-`/mnt/mydata/kRTOSSDK`（仅用于提供 SDK 头文件与链接脚本；若路径不同，
-用环境变量 `K230_SDK_ROOT=/你的路径` 或 CMake 参数 `-DK230_SDK_ROOT=...` 覆盖）。
+环境要求：`cmake >= 3.20`、`ninja`、`scp`（网络部署用）。SDK 位于
+`/mnt/mydata/kRTOSSDK`（仅用于提供 SDK 头文件与链接脚本；用 `K230_SDK_ROOT` 或
+`-DK230_SDK_ROOT=...` 覆盖）。
 
 ## 4. 编译
 
-产物：`build/<应用名>/<应用名>` —— riscv64 静态链接 ELF，可直接拷板运行。
-同时生成 `build/compile_commands.json`，供 clangd 使用。
+```bash
+build-rtos              # 短命令：全部板端目标（等价于下面第一条）
+bash .script/build-rtos              # 全部板端目标
+bash .script/build-rtos dart_vision  # 只编识别+录像 payload
+bash .script/build-rtos launcher     # 只编启动器
+bash .script/build-rtos --host       # host 编译检查（不需要工具链，不可上板）
+```
+
+产物：`build-cross/<目标名>/<目标名>` —— riscv64 **静态链接** ELF（`-T link.lds`，
+入口 `0x200000000`），可直接拷板运行。`build-cross/compile_commands.json` 供 clangd 使用。
+
+> 板端 ELF 必须链 `k230_rtos_app`（提供链接脚本与 `-static`）；少了它就会链成动态
+> ELF，RT-Smart 用户态加载不了。
 
 ## 5. 部署到板子
 
+日常三条短命令（在 `.script/`，用法见 [`.script/README.md`](.script/README.md)）。先做一次
+PATH 注册，之后就能直接敲、不带 `./`：
+
 ```bash
-bash scripts/deploy.sh my_app 192.168.1.100          # 拷贝到板端 /tmp
-bash scripts/deploy.sh my_app 192.168.1.100 /sdcard/app
+bash .script/install-rtos --both   # 一次性：追加到 ~/.bashrc 与 ~/.zshrc（-u 可撤销）
+source ~/.bashrc                   # 当前终端生效（zsh 用 source ~/.zshrc）
+
+build-rtos            # 交叉编译（-r 清 build-cross 重编；<目标名> 只编一个；--host 编译检查）
+deploy-rtos           # 上板 launcher + dart_vision + startup_final.list -> /sdcard/app
+clean-rtos            # 清空 /sdcard/app 下的内容（目录本身保留；固件自带的 examples/ 不动）
 ```
 
-然后在板端 msh 终端运行：
+`deploy-rtos` 默认通过 GIO/MTP 部署到当前 USB 板子的 `/sdcard/app`，
+无需先设置环境变量。其它地址或传输方式可通过环境变量或 `.script/board.env` 配置：
+
+```bash
+export BOARD_IP=192.168.1.100     # ssh/scp（需免密），优先级最高
+export SDCARD=/media/$USER/<卡>   # 读卡器：直接写已挂载的 SD 卡
+export SDCARD='gphoto2://Kendryte_CanMV_001000000/store_ffff0001'   # 板子用 USB 挂着（MTP）
+```
+
+`store_ffff0001` = 板端 `/sdcard`（要部署的目标），`store_ffff0002` = `/data`；
+MTP 部署会检查分区根目录的 `revision.txt`；缺少时须有已部署的 launcher 与清单，否则
+拒绝写入。地址写进 `.script/board.env` 更省事：
+`cp .script/board.env.example .script/board.env`（该文件已被 gitignore）。
+
+USB/MTP 部署使用 `gio copy` 直接操作存储 URI，不通过 GVfs 的 FUSE 路径写文件。
+脚本先将旧文件备份到主机 `/tmp/dart-mtp-backup.*`，上传临时文件并完整回读校验
+SHA-256，再改名替换并再次校验；日志和录像保留。官方
+[如何运行示例程序](https://www.kendryte.com/k230_rtos/zh/main/userguide/how_to_run_samples.html)
+也支持用 MTP 手动拷贝独立编译的 ELF。此前 FUSE `cp` 出现的 0 字节现象不能据此判断
+所有 MTP 写入都失败，部署结果以回读校验为准。
+
+各种传输方式统一使用 `deploy-rtos`，地址通过环境变量或 `board.env` 配置：
+
+```bash
+# 板子有网络：scp + md5 校验
+BOARD_IP=192.168.1.100 bash .script/deploy-rtos              # 两个 ELF + 清单
+BOARD_IP=192.168.1.100 bash .script/deploy-rtos dart_vision  # 只推一个目标
+
+# 读卡器：全量部署默认清理日志与录像，--keep-logs 可保留
+SDCARD="/media/$USER/SDCARD" bash .script/deploy-rtos --keep-logs
+SDCARD="/media/$USER/SDCARD" bash .script/deploy-rtos dart_vision
+
+# USB/MTP：默认板子无需配置；其它 URI 也可通过 SDCARD 指定
+bash .script/deploy-rtos
+```
+
+自定义构建目录统一使用 `DART_BUILD_DIR`，构建和部署时设置为相同路径；部署兼容旧变量
+`BUILD_DIR`。相对路径以仓库根目录为基准，绝对路径也可使用。
+
+然后在板端 msh 里**先手动验证，再注册开机自启**：
 
 ```text
-msh> /tmp/my_app                # 或 /sdcard/app/my_app
+msh> /sdcard/app/launcher -t                            # 只校验清单，不启动进程
+msh> /sdcard/app/dart_vision --seconds 10 --record off   # 采集 + 识别
+msh> /sdcard/app/dart_vision --seconds 10                # 加上录像
 ```
 
-> 说明：官方镜像把应用放在 `/sdcard/app/`；手动拷贝调试时放 `/tmp` 即可。
-> 若板子开了 SSH/scp 服务（RT-Smart 默认支持网络），deploy.sh 直接可用；
-> 也可通过其他方式（U 盘、串口 xmodem、ADB push 等）把 ELF 拷进板子，本质相同。
+```bash
+make menuconfig
+# RT-Smart Configuration
+#   Rtsmart auto execute command string = /sdcard/app/launcher
+make && 烧录固件
+```
+
+之后日常迭代只替换 `/sdcard/app/` 下的 ELF 或编辑 `startup_final.list`，重启即生效。
+**不要**把自启命令写成 `@preload`（Fast Boot 跑镜像内的 rtapp 备份、不读文件系统，
+替换 SD 卡不生效）；secure boot 固件强制 `@preload`，本方案不可用。
+清单语法、日志布局与 v1 教训见 [`src/launcher/README.md`](src/launcher/README.md)。
 
 ## 6. VSCode + clangd 使用
 
 1. VSCode 打开本仓库，按提示安装推荐扩展：
    **clangd**（`llvm-vs-code-extensions.vscode-clangd`）、
    **CMake Tools**（`ms-vscode.cmake-tools`）、**CMake**（`twxs.cmake`）。
-2. 先运行一次 `bash scripts/build.sh` 生成 `build/compile_commands.json`
-   （或让 CMake Tools 自动配置，`.vscode/settings.json` 已写好参数）。
+2. 先跑一次 `bash .script/build-rtos`（或 `--host`）生成 `build-cross/compile_commands.json`。
 3. clangd 自动读取编译数据库 → 获得完整补全、跳转、诊断。
-   - 关闭了 MS C/C++ 的 IntelliSense，避免冲突。
-   - `.clangd` 用 `--target=riscv64-unknown-linux-musl` 做索引，
-     不影响真实编译（真实编译仍由 GCC 工具链完成）。
+   - `include/CMakeLists.txt` 里有 `*_CLANGD_COMMANDS` 目标，专门为只在交叉构建下
+     编译的 SDK 相关源码（camera/k230、spi、imu/k230）生成编译命令。
 4. 常用命令：`Ctrl+Shift+B` 编译；"Tasks: Run Task" 可部署到板子。
 
 ## 7. 写业务代码时常用的 SDK 头文件（已自动加进 include 路径）
@@ -100,15 +190,17 @@ msh> /tmp/my_app                # 或 /sdcard/app/my_app
 | 板级配置宏 | `CONFIG_*`（autoconf.h 自动 include） | SDK `include/generated/autoconf.h` |
 
 需要 MPP 库/OpenCV/nncase 等链接库时，参照官方 SDK
-`src/rtsmart/libs/mk/libmpp.mk` 等文件把 `-L`/`-l` 参数补进应用即可
-（本模板刻意保持最小，不预置未用到的库）。
+`src/rtsmart/libs/mk/libmpp.mk` 等文件把 `-L`/`-l` 参数补进应用即可。
 
 ## 8. 常见问题
 
-- **找不到工具链**：先运行 `bash scripts/setup-toolchain.sh`；或已装在其他
-  位置时用 `-DK230_TOOLCHAIN_DIR=...` 指定。
-- **SDK 路径不同**：`export K230_SDK_ROOT=/你的SDK路径` 后再 `build.sh`。
-- **clangd 无补全**：确认 `build/compile_commands.json` 存在
-  （运行过一次 `build.sh`），并已安装 clangd 扩展。
-- **与固件的关系**：本仓库不编译、不烧录固件；板子上必须是已支持
-  RT-Smart 用户态（lwp）的固件，ELF 才能直接运行。
+- **找不到工具链**：`export K230_TOOLCHAIN_DIR=...`（见 §3），或把工具链放到
+  `<仓库>/third_party/toolchain/<工具链目录>/bin`。
+- **SDK 路径不同**：`export K230_SDK_ROOT=/你的SDK路径` 后再 `build-rtos`。
+- **`Cannot find source file`**：模块目录改名后没同步 `src/CMakeLists.txt`（曾在
+  `recording/`→`recordor/` 改名时发生过），路径以本文件 §1 表格为准。
+- **板端提示"已在运行"**：上一轮 launcher 未退干净，检查 `/sdcard/app/logs/*.pid`。
+- **clangd 无补全**：确认 `build-cross/compile_commands.json` 存在（跑过一次
+  `build-rtos`），并已安装 clangd 扩展。
+- **与固件的关系**：本仓库不编译、不烧录固件；板子上必须是已支持 RT-Smart
+  用户态（lwp）的固件，ELF 才能直接运行。

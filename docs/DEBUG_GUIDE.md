@@ -1,18 +1,23 @@
 # 板端调试手册（v2 工作流）
 
-状态：调试模板；当前仓库没有可部署的业务 ELF，以下命令和路径只有在对应脚本/应用落地后才可使用。
+状态：可执行的调试手册。当前仓库已有可部署 ELF（`launcher`、`dart_vision`）与
+构建/部署脚本，启动链路见 [`LAUNCHER_DESIGN.md`](LAUNCHER_DESIGN.md)。
+**板端尚未验证**：凡本文档中的板端结论都必须以真实串口日志与样本为准。
 
 这份手册服务于“用户态业务程序”的板端验证，不调试固件本身。每次试验记录 Git commit、应用名、参数版本、板端固件版本、工具链、日志目录和原始样本。
 
 ## 0. 先确认当前状态
 
-当前阶段只能做：阅读设计、检查 CMake/工具链配置和规划模块边界。不要因为文档中出现 `apps/<app>` 或 `/sdcard/app/<app>` 就假设已经存在可执行文件。部署前必须满足：
+部署前必须满足：
 
-- 应用目录有自己的 `CMakeLists.txt` 和入口；
-- `bash scripts/build.sh <app>` 能生成 ELF（脚本尚未在当前骨架中实现时，记录为阻塞）；
-- 交叉构建、链接脚本和 SDK 依赖明确；
+- 应用目录有自己的入口与在 `src/CMakeLists.txt` 中声明的目标；
+- `bash scripts/build.sh <目标名>` 能生成 ELF；
+- 交叉构建、链接脚本（SDK `link.lds`）和 SDK 依赖明确；
 - 版本化参数和日志 schema 已写入应用配置；
-- 板端有安全的停止/回收路径。
+- 板端有安全的停止/回收路径（`--seconds` 或 SIGINT/SIGTERM，退出逐 step 留日志）。
+
+当前可直接部署的两个目标：`launcher`（自启器）、`dart_vision`（识别+录像 payload）。
+板端 msh 里的第一步永远是 `/sdcard/app/launcher -t`（只校验清单，不启动进程）。
 
 ## 1. 排查顺序
 
@@ -26,14 +31,33 @@
 
 ## 2. 构建与部署
 
-目标工作流来自仓库 `README.md`：
-
-```text
-配置 SDK/toolchain → 构建一个 apps/<app> → 获得 build/<app>/<app>
-→ 通过 scp/可移动介质部署 → 在 RT-Smart 用户态运行
+```bash
+bash scripts/build.sh --all                    # -> build-cross/{launcher,dart_vision}/...
+bash scripts/deploy.sh --all <板子IP> --list    # scp + md5 校验（有网络时首选）
+bash scripts/deploy-sdcard.sh /media/$USER/<卡> # 无网络：读卡器直写
+bash scripts/deploy-sdcard.sh 'gphoto2://Kendryte_CanMV_001000000/store_ffff0001'  # 板子用 USB 挂着（MTP）
 ```
 
-部署清单至少包含 ELF、应用参数、日志配置和 schema 版本。不要把固件镜像、BSP 或 SDK 输出目录提交进业务仓库。首次验证建议带有界运行时长和禁用录像/控制的开关。
+**MTP（gphoto2）部署的两个硬事实**（2026-10-13 实测）：
+
+| 现象 | 实测数据 | 结论 |
+|---|---|---|
+| 覆盖已存在的文件 | `cp -f` 返回 0，文件变成 **0 字节** | 绝不能覆盖，必须先删/改名再写 |
+| 覆盖之后继续写 | 换成全新文件名也全是 0 字节，`gio mount -u/-m` 无效 | 板端 MTP 已坏，只能拔插 USB / 重启板子 |
+| 存储映射 | `store_ffff0001` 根目录有 `revision.txt` | 它是板端 `/sdcard`（要部署的目标）；`store_ffff0002` 是 `/data` |
+
+`deploy-sdcard.sh` 已按这些事实写成：写探针自检 → 写临时名并校验大小+md5 → 删旧名 → 改名 →
+再校验；任一步失败就中止且不动板上文件。板子没有网络又要反复换版本时，走读卡器最稳。
+
+```text
+配置 SDK/toolchain → 构建一个 src/ 下的目标 → 获得 build-cross/<目标名>/<目标名>
+→ 通过 scp/读卡器部署到 /sdcard/app → 在 RT-Smart 用户态运行
+→ 板端先手动跑，再注册 launcher 开机自启
+```
+
+部署清单至少包含 ELF、应用参数、日志配置和 schema 版本。不要把固件镜像、BSP 或 SDK
+输出目录提交进业务仓库。首次验证建议带有界运行时长（`--seconds`）和禁用录像的开关
+（`--record off`）。板端第一次接触新配置时，先 `/sdcard/app/launcher -t` 校验清单。
 
 ## 3. 日志契约
 
@@ -79,7 +103,12 @@ ts_ms level module op code native detail action count msg="..."
 
 ## 7. 录像与取证
 
-录像是异步数据面，不得阻塞采集或控制。记录帧号、源时间戳和是否重复，不能用图像哈希判断重复帧。队列满可以丢样本，但必须累计丢弃数；写线程不在栈上放大对象，不逐包反复映射/解映射。
+当前 v2 的录像**只有灰度取证**：`src/recordor` 把帧拷成紧凑 Y8 后写
+`records/rec_NNNN/img/frame_XXXXXXXX.pgm`（或按阈值打包的 `.pbm`），并在
+`records/rec_NNNN/logs/frames.csv` 每帧一行记录放行决定；`dart_vision` 另外写
+`records/detection.csv`（每帧的识别结果与扫描窗口）。硬件 H.264/VENC 在 v2 尚不存在。
+
+录像是异步数据面，不得阻塞采集或控制。记录帧号、源时间戳和是否重复，不能用图像哈希判断重复帧。队列满可以丢样本，但必须累计丢弃数（`rec_busy`/`event_dropped`）；写线程不在栈上放大对象，不逐包反复映射/解映射。
 
 MPP/VENC 行为高度依赖固件。没有通过资源探针和小规模送帧/取码流验证前，不要进入长时间录制；失败后优先保留原始帧/CSV 取证，不要盲目拆链。任何 SDK stop/destroy 的风险都应写入 ACL 的恢复策略。
 

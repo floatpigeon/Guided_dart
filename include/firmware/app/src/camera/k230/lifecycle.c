@@ -96,14 +96,17 @@ static int cleanup_init_resources(dart_camera_t *camera) {
         }
     }
 
-    /* Do not tear down the pool while VICAP may still own it. A failed stop
-     * leaves the stream live and a failed deinit leaves SDK state uncertain;
-     * both cases require an explicit retry from the FAULTED handle.
+    /* Keep mappings while DMA may still write. Unmap before SDK deinit frees
+     * the pool; failed cleanup retains the handle for an explicit retry.
      */
     if (primary != DART_CAMERA_OK) {
         camera->state = DART_CAMERA_STATE_FAULTED;
         return primary;
     }
+
+    const int pool_rc = dart_camera_cleanup_output_pool(&camera->output_pool,
+                                                         &camera->state);
+    if (pool_rc != DART_CAMERA_OK) return pool_rc;
 
     if (camera->vicap_initialized) {
         const k_s32 rc = kd_mpi_vicap_deinit(VICAP_DEV_ID_0);
@@ -112,12 +115,6 @@ static int cleanup_init_resources(dart_camera_t *camera) {
             return rc;
         }
         camera->vicap_initialized = 0;
-    }
-
-    const int pool_rc = dart_camera_cleanup_output_pool(&camera->output_pool,
-                                                         &camera->state);
-    if (pool_rc != DART_CAMERA_OK && primary == DART_CAMERA_OK) {
-        primary = pool_rc;
     }
 
     /* Keep the media attachment while any resource remains live. This prevents
@@ -223,15 +220,6 @@ int dart_camera_init(dart_camera_t *camera, dart_media_t *media,
         return primary;
     }
 
-    rc = dart_camera_prepare_output_pool(&camera->output_pool,
-                                         yuv420_block_bytes(config->output_width,
-                                                            config->output_height),
-                                         config->channel_buffers, &camera->state);
-    if (rc != DART_CAMERA_OK) {
-        (void)cleanup_init_resources(camera);
-        return rc;
-    }
-
     k_vicap_dev_attr dev = {0};
     dev.acq_win.width = sensor.width;
     dev.acq_win.height = sensor.height;
@@ -264,7 +252,8 @@ int dart_camera_init(dart_camera_t *camera, dart_media_t *media,
     channel.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
     channel.buffer_num = config->channel_buffers;
     channel.buffer_size = yuv420_block_bytes(config->output_width, config->output_height);
-    channel.buffer_pool_id = camera->output_pool.pool_id;
+    /* This SDK resets supplied pool IDs and allocates its own output pool. */
+    channel.buffer_pool_id = (k_s32)VB_INVALID_POOLID;
     channel.alignment = 12;
     rc = kd_mpi_vicap_set_chn_attr(VICAP_DEV_ID_0, VICAP_CHN_ID_0, channel);
     if (rc != 0) {
@@ -283,6 +272,19 @@ int dart_camera_init(dart_camera_t *camera, dart_media_t *media,
         (void)cleanup_init_resources(camera);
         return primary;
     }
+
+    rc = kd_mpi_vicap_get_chn_attr(VICAP_DEV_ID_0, VICAP_CHN_ID_0, &channel);
+    if (rc != 0) {
+        const int primary = rc;
+        (void)cleanup_init_resources(camera);
+        return primary;
+    }
+    if (channel.buffer_num != config->channel_buffers ||
+        channel.buffer_size < yuv420_block_bytes(config->output_width, config->output_height)) {
+        (void)cleanup_init_resources(camera);
+        return DART_CAMERA_E_FRAME_GEOMETRY_MISMATCH;
+    }
+    camera->output_pool.block_bytes = channel.buffer_size;
 
     camera->caps.abi_version = DART_CAMERA_ABI_VERSION;
     camera->caps.struct_size = sizeof(camera->caps);
@@ -310,6 +312,15 @@ int dart_camera_start(dart_camera_t *camera) {
     camera->stream_started = 1;
     camera->state = DART_CAMERA_STATE_STARTED;
     camera->exposure_configured = 0;
+
+    rc = dart_camera_prepare_frame_mappings(camera);
+    if (rc != DART_CAMERA_OK) {
+        const int primary = rc;
+        if (dart_camera_stop(camera) != DART_CAMERA_OK) {
+            camera->state = DART_CAMERA_STATE_FAULTED;
+        }
+        return primary;
+    }
 
     k_vicap_sensor_attr sensor_attr = {0};
     sensor_attr.dev_num = VICAP_DEV_ID_0;

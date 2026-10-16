@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# ============================================================================
+# install-rtos —— 一次性把 .script/ 挂进 PATH，之后新开终端直接敲
+#                 build-rtos / deploy-rtos / clean-rtos（不用 ./，也不用全路径）
+#
+# 用法（0 或 1 个参数，在仓库根目录执行）:
+#   bash .script/install-rtos           写进当前 shell 的 rc（bash -> ~/.bashrc）
+#   bash .script/install-rtos --both    ~/.bashrc 与 ~/.zshrc 都写（拿不准用这个）
+#   bash .script/install-rtos --bash    只写 ~/.bashrc
+#   bash .script/install-rtos --zsh     只写 ~/.zshrc
+#   bash .script/install-rtos -u        撤销：删掉本脚本写入的段落（两个 rc 都查）
+#   bash .script/install-rtos -h        本帮助
+#
+# 写入的是带标记的一段（# >>> dart-rtos >>> ... # <<< dart-rtos <<<），
+# 仓库搬家后重跑本脚本会自动把路径改成新位置；-u 只删这一段，rc 里其它行一行都不动。
+# 改动前会备份成 <rc>.rtos.bak（只备份一次，不会覆盖旧备份）。
+#
+# 生效: source ~/.bashrc（或新开终端），然后就能直接敲 build-rtos / deploy-rtos / clean-rtos。
+# ============================================================================
+
+# 这是"要执行"的脚本，不是"要 source"的：source 会让 set -euo pipefail 污染调用者的 shell。
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    printf '[rtos] 请执行而不是 source: bash .script/install-rtos\n' >&2
+    return 1
+fi
+
+set -euo pipefail
+
+SELF="${BASH_SOURCE[0]}"
+SCRIPT_DIR="$(cd "$(dirname "${SELF}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PATH_DIR="${SCRIPT_DIR}"
+SELF_PATH="${SCRIPT_DIR}/$(basename "${SELF}")"
+
+MARK_BEGIN='# >>> dart-rtos >>>'
+MARK_END='# <<< dart-rtos <<<'
+BACKUP_SUFFIX='.rtos.bak'
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    _c_info=$'\033[32m' _c_warn=$'\033[33m' _c_err=$'\033[31m' _c_off=$'\033[0m'
+else
+    _c_info='' _c_warn='' _c_err='' _c_off=''
+fi
+info() { printf '%s[rtos]%s %s\n' "${_c_info}" "${_c_off}" "$*"; }
+warn() { printf '%s[rtos]%s %s\n' "${_c_warn}" "${_c_off}" "$*" >&2; }
+die() {
+    printf '%s[rtos]%s %s\n' "${_c_err}" "${_c_off}" "$*" >&2
+    exit 1
+}
+
+usage() {
+    sed -n '3,16p' "${SELF_PATH}" | sed 's/^# \{0,1\}//'
+}
+
+# PATH 里要追加的那一段（$PATH 必须原样写进 rc，不能在这里展开）。
+make_block() {
+    printf '%s\n' "${MARK_BEGIN}"
+    printf '# 由 .script/install-rtos 写入；撤销: bash .script/install-rtos -u\n'
+    printf 'export PATH="$PATH:%s"\n' "$1"
+    printf '%s\n' "${MARK_END}"
+}
+
+extract_block() { sed -n "/^${MARK_BEGIN}\$/,/^${MARK_END}\$/p" "$1"; }
+has_block() { grep -qF -- "${MARK_BEGIN}" "$1"; }
+remove_block() { sed -i "/^${MARK_BEGIN}\$/,/^${MARK_END}\$/d" "$1"; }
+
+backup_once() {
+    local rc="$1" bak="$1${BACKUP_SUFFIX}"
+    if [[ ! -e "${bak}" ]]; then
+        cp -a -- "${rc}" "${bak}"
+        info "备份: ${bak}"
+    fi
+}
+
+install_into() {
+    local rc="$1"
+    local block current
+    [[ -n "${rc}" ]] || return 0
+    [[ -d "$(dirname "${rc}")" ]] || die "目录不存在: $(dirname "${rc}")"
+
+    block="$(make_block "${PATH_DIR}")"
+
+    if [[ ! -e "${rc}" ]]; then
+        info "创建 ${rc}"
+        : > "${rc}"
+    fi
+    [[ -w "${rc}" ]] || die "${rc} 不可写"
+
+    if has_block "${rc}"; then
+        grep -qF -- "${MARK_END}" "${rc}" \
+            || warn "${rc} 里有起始标记却没有结束标记，本次会删到文件末尾"
+        current="$(extract_block "${rc}")"
+        if [[ "${current}" == "${block}" ]]; then
+            info "${rc} 已配置且路径未变，跳过"
+            return 0
+        fi
+        backup_once "${rc}"
+        remove_block "${rc}"
+        info "更新 ${rc}: PATH 路径改为 ${PATH_DIR}"
+    else
+        backup_once "${rc}"
+        if [[ -s "${rc}" ]] && [[ -n "$(tail -c 1 "${rc}")" ]]; then
+            printf '\n' >> "${rc}"   # 文件末尾没有换行时先补一个，避免粘到上一行
+        fi
+        info "写入 ${rc}: PATH 追加 ${PATH_DIR}"
+    fi
+
+    make_block "${PATH_DIR}" >> "${rc}"
+    grep -qF -- "export PATH=\"\$PATH:${PATH_DIR}\"" "${rc}" \
+        || die "写入后校验失败: ${rc}"
+}
+
+uninstall_from() {
+    local rc="$1"
+    [[ -f "${rc}" ]] || return 0
+    if ! has_block "${rc}"; then
+        info "${rc} 里没有本脚本写入的段落，跳过"
+        return 0
+    fi
+    backup_once "${rc}"
+    remove_block "${rc}"
+    info "已从 ${rc} 删除 dart-rtos 段落"
+}
+
+# $SHELL 是登录 shell，未必是此刻正在敲命令的那个：先用 $SHELL 猜，但如果猜中的
+# rc 根本不存在、另一个却存在，就按存在的那个来（更贴近实际在用的 shell）。
+default_rc() {
+    local bash_rc="${HOME}/.bashrc" zsh_rc="${HOME}/.zshrc"
+    case "${SHELL:-}" in
+    *zsh)
+        if [[ ! -e "${zsh_rc}" && -e "${bash_rc}" ]]; then printf '%s' "${bash_rc}"; else printf '%s' "${zsh_rc}"; fi
+        ;;
+    *)
+        if [[ ! -e "${bash_rc}" && -e "${zsh_rc}" ]]; then printf '%s' "${zsh_rc}"; else printf '%s' "${bash_rc}"; fi
+        ;;
+    esac
+}
+
+if [[ $# -gt 1 ]]; then
+    usage >&2
+    die "只接受 0 或 1 个参数（收到 $# 个）"
+fi
+
+[[ -n "${HOME:-}" ]] || die "HOME 未设置，无法定位 rc 文件"
+
+MODE=install
+RC_HINT=''
+RCS=()
+case "${1:-}" in
+-h | --help)
+    usage
+    exit 0
+    ;;
+'')
+    RCS=("$(default_rc)")
+    RC_HINT="按 SHELL=${SHELL:-未设置} 选的 rc 是 ${RCS[0]}；要显式指定用 --bash / --zsh / --both"
+    ;;
+--bash)
+    RCS=("${HOME}/.bashrc")
+    ;;
+--zsh)
+    RCS=("${HOME}/.zshrc")
+    ;;
+--both)
+    RCS=("${HOME}/.bashrc" "${HOME}/.zshrc")
+    ;;
+-u | --uninstall)
+    MODE=uninstall
+    RCS=("${HOME}/.bashrc" "${HOME}/.zshrc")
+    ;;
+-*)
+    usage >&2
+    die "未知选项: $1"
+    ;;
+*)
+    usage >&2
+    die "未知参数: $1（本脚本不接受位置参数，见上面的用法）"
+    ;;
+esac
+
+for cmd in build-rtos deploy-rtos clean-rtos; do
+    [[ -x "${PATH_DIR}/${cmd}" ]] || warn "${PATH_DIR}/${cmd} 不存在或不可执行"
+done
+
+if [[ "${MODE}" == "uninstall" ]]; then
+    info "撤销 dart-rtos 的 PATH 配置"
+    for rc in "${RCS[@]}"; do
+        uninstall_from "${rc}"
+    done
+    echo
+    info "已生效的旧终端仍带旧 PATH，重开终端即可恢复干净环境。"
+    exit 0
+fi
+
+info "短命令目录: ${PATH_DIR}"
+if [[ -n "${RC_HINT}" ]]; then
+    info "${RC_HINT}"
+fi
+for rc in "${RCS[@]}"; do
+    install_into "${rc}"
+done
+
+echo
+info "让配置生效（当前终端）:"
+for rc in "${RCS[@]}"; do
+    printf '  source %s\n' "${rc}"
+done
+info "新开的终端会自动生效，之后可直接敲: build-rtos [-r] / deploy-rtos / clean-rtos"

@@ -1,30 +1,35 @@
 # 检测与 ROI
 
-纯 C++23 模块，入口为 `roi.cpp`，CMake 接口目标为 `dart_detection`。输入为相机
-ACL 的只读 `dart::camera::FrameView`；检测同步借用像素，不取帧、不释放租约、不保留帧指针。
+纯 C++23 模块，CMake 目标为 `dart_detection`（**STATIC**，编译
+`detector.cpp` 与 `roi.cpp`）。输入为相机 ACL 的只读 `dart::camera::FrameView`；
+检测同步借用像素，不取帧、不释放租约、不保留帧指针。
 
-`detector.cpp` 与 `roi.cpp` 均在类内定义方法，带重复包含保护；包含 `roi.cpp` 即可使用完整模块。
-应用链接 `dart_detection` 获取 C++23 和相机接口依赖，两份实现不再独立编译。
+`detector.cpp`（`BlobWorkspace` / `LightDetector` / `ArmorDetector`）与 `roi.cpp`
+（`internal::LightTracker` / `internal::RoiPolicy` / `RoiDetector`）是**两个独立翻译
+单元**，各自 `#include "detector.hpp"`、方法在类外定义，文件内没有重复包含保护。
+因此消费者**只包含 `detector.hpp` 并链接 `dart_detection`**，不要 `#include` 任何
+`.cpp`（早前 README 里"包含 roi.cpp 即可"的写法已作废：那样两个文件既不编译也不被
+类型检查）。已完成的应用示例见 `src/vision/main.cpp`。
 
-初始化时构造 `dart::detection::roi` 并调用 `prepare(max_width, max_height)`。在现有
-采集线程拿到 `AcquireStatus::kFrame` 后调用：
+初始化时构造 `dart::detection::RoiDetector` 并调用
+`Prepare(max_width, max_height)`。在现有采集线程拿到 `AcquireStatus::kFrame` 后调用：
 
 ```cpp
-#include "src/detection/roi.cpp"
+#include "src/detector/detector.hpp"   // 链接 dart_detection
 
-auto result = detector.detect(acquired.lease.view());
+auto result = detector.Detect(acquired.lease.view());
 if (result && result->target.valid) {
     const auto center = result->target.center;  // 全图像素坐标，允许半像素
-    // 将 center 和 result->source_frame_id / received 交给下一层。
+    // 将 center 和 result->source.frame_id / result->source.received 交给下一层。
 }
 // 其他同步消费者结束后，现有流水线在同一线程释放 acquired.lease。
-// kNoFrame / kLeaseExhausted 不调用 detect()，不构造假帧推进 ROI 状态。
+// kNoFrame / kLeaseExhausted 不调用 Detect()，不构造假帧推进 ROI 状态。
 ```
 
-`prepare()` 和 `detect()` 返回 `std::expected`。无目标是成功结果，表现为
+`Prepare()` 和 `Detect()` 返回 `std::expected`。无目标是成功结果，表现为
 `kind == TargetKind::kNone`、`target.valid == false`；工作区不足、非法输入和乱序帧
 返回 `DetectionError`。启动分配失败由调用方处理，热路径没有动态分配。一个实例用于
-一条按序调用的流水线；相机停止重启后调用 `reset()`，再接受新的帧号。
+一条按序调用的流水线；相机停止重启后调用 `Reset()`，再接受新的帧号。
 
 `detector.cpp` 实现 `light_detect`、`armor_detect` 和共用的游程测量：
 
@@ -62,5 +67,6 @@ if (result && result->target.valid) {
 `src/detection/armor/armor_{rules,geometry,windows}.cpp` 和
 `include/detection/math/shape_metrics.hpp`。
 
-合并后应在包含 `roi.cpp` 的应用上进行主机与 K230 交叉构建验证；多个编译单元包含
-这两个文件不会产生重复定义。实际识别质量、耗时和 DMA/流水线行为仍待板端验证。
+`dart_detection` 已在 host 与 K230 交叉构建下作为静态库编译通过（2026-10-13：
+`bash .script/build-rtos --host` 与 `bash .script/build-rtos dart_vision`）。
+实际识别质量、耗时和 DMA/流水线行为仍待板端验证。

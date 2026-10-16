@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# ============================================================================
+# clean-rtos —— 清除板端 /sdcard/app/ 下的内容（**保留该目录本身**）
+#
+# 用法（0 或 1 个参数）:
+#   clean-rtos              清空 /sdcard/app 下**全部**内容（目录本身保留；
+#                           固件自带的 examples/ 不动，见下面的"保留"说明）
+#   clean-rtos launcher     只删 /sdcard/app/launcher
+#   clean-rtos dart_vision  只删 /sdcard/app/dart_vision
+#   clean-rtos list         只删 /sdcard/app/startup_final.list
+#   clean-rtos logs         只清 /sdcard/app/logs/*（logs 目录保留）
+#   clean-rtos records      只清 /sdcard/app/records/*（records 目录保留）
+#   clean-rtos examples     删固件自带的 examples/（**慎用**：删了只能重烧固件）
+#   clean-rtos -h           本帮助
+#
+# 板子地址走环境变量: BOARD_IP（ssh/scp）或 SDCARD（读卡器 / MTP URI），
+# 可选 BOARD_USER（默认 root）、BOARD_DIR（默认 /sdcard/app）。
+#
+# 安全护栏：只允许删除绝对路径、拒绝 /、拒绝含 ".." 的路径；
+#           每条被删的项都会先打印出来。删除不可恢复，板端没有回收站。
+# ============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=.script/_rtos-common.sh
+source "${SCRIPT_DIR}/_rtos-common.sh"
+
+usage() {
+    sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+if [[ $# -gt 1 ]]; then
+    usage >&2
+    die "只接受 0 或 1 个参数（收到 $# 个）"
+fi
+
+ARG="${1:-}"
+case "${ARG}" in
+-h | --help)
+    usage
+    exit 0
+    ;;
+'' | launcher | dart_vision | list | logs | records | examples) ;;
+-*)
+    usage >&2
+    die "未知选项: ${ARG}"
+    ;;
+*)
+    usage >&2
+    die "未知目标: ${ARG}（可选 launcher | dart_vision | list | logs | records | examples）"
+    ;;
+esac
+
+rtos_resolve_transport
+
+# 清空一个目录下的所有条目（目录本身保留）。
+# 固件自带的内容（SDCARD 分区上的 examples/ 等）默认**不删**：那些不属于本仓库，
+# 删了只能重新烧录固件才能回来。要删就显式点名：clean-rtos examples
+RTOS_KEEP_NAMES="examples kmodel"
+wipe_children() {
+    local dir="$1"
+    local name
+    local found=0
+    local kept=0
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        if [[ " ${RTOS_KEEP_NAMES} " == *" ${name} "* ]]; then
+            info "  保留 ${dir}/${name}（固件自带，不属于本仓库）"
+            kept=1
+            continue
+        fi
+        found=1
+        info "  删除 ${dir}/${name}"
+        rtos_remove "${dir}/${name}"
+    done < <(rtos_list_children "${dir}")
+    if [[ "${found}" == "0" && "${kept}" == "0" ]]; then
+        info "  ${dir} 已经是空的"
+    fi
+}
+
+case "${ARG}" in
+'')
+    info "清空 ${RTOS_DIR} 下的全部内容（保留 ${RTOS_DIR} 本身）"
+    rtos_assert_safe_path "${RTOS_DIR}"
+    wipe_children "${RTOS_DIR}"
+    ;;
+logs | records)
+    info "清空 ${RTOS_DIR}/${ARG}/*（保留 ${ARG} 目录）"
+    wipe_children "${RTOS_DIR}/${ARG}"
+    ;;
+list)
+    info "删除 ${RTOS_DIR}/startup_final.list"
+    rtos_remove "${RTOS_DIR}/startup_final.list"
+    ;;
+*)
+    info "删除 ${RTOS_DIR}/${ARG}"
+    rtos_remove "${RTOS_DIR}/${ARG}"
+    ;;
+esac
+
+info "完成。目录 ${RTOS_DIR} 仍存在${ARG:+（只清了 ${ARG}）}。"

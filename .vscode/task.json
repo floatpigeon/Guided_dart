@@ -4,36 +4,39 @@
     {
       "label": "Build all apps",
       "type": "shell",
-      "command": "bash ${workspaceFolder}/scripts/build.sh",
+      "command": "bash ${workspaceFolder}/.script/build-rtos",
       "group": { "kind": "build", "isDefault": true },
       "problemMatcher": ["$gcc"]
     },
     {
       "label": "Build one app",
       "type": "shell",
-      "command": "bash ${workspaceFolder}/scripts/build.sh ${input:appName}",
+      "command": "bash ${workspaceFolder}/.script/build-rtos ${input:appName}",
       "group": "build",
       "problemMatcher": ["$gcc"]
     },
     {
       "label": "Deploy app to board",
-      "type": "shell",
-      "command": "bash ${workspaceFolder}/scripts/deploy.sh ${input:appName} ${input:boardIp}",
+      "type": "process",
+      "command": "bash",
+      "args": ["${workspaceFolder}/.script/deploy-rtos", "${input:appName}"],
+      "options": { "env": { "BOARD_IP": "${input:boardIp}" } },
       "problemMatcher": []
     },
     {
-      "label": "Setup toolchain",
+      "label": "Build host",
       "type": "shell",
-      "command": "bash ${workspaceFolder}/scripts/setup-toolchain.sh",
-      "problemMatcher": []
+      "command": "bash ${workspaceFolder}/.script/build-rtos --host",
+      "problemMatcher": ["$gcc"]
     }
   ],
   "inputs": [
     {
       "id": "appName",
-      "type": "promptString",
-      "description": "应用名（apps/ 下的目录名）",
-      "default": "app_template"
+      "type": "pickString",
+      "description": "板端可执行目标",
+      "options": ["dart_vision", "launcher"],
+      "default": "dart_vision"
     },
     {
       "id": "boardIp",

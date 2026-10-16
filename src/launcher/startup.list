@@ -1,0 +1,100 @@
+# ============================================================================
+# launcher 开机自启动清单 —— 本文件是**源码母版**（src/launcher/startup.list）
+#
+# 板端运行时默认读 /sdcard/app/startup_final.list（launcher 源码里的
+# DEFAULT_LIST；也可用 argv[1] 指定其它清单）。部署时把本文件拷到板端并改名为：
+#     /sdcard/app/startup_final.list          （与 launcher 同目录）
+# 之后直接编辑 SD 卡上这一份即可，无需重编 launcher。
+#
+# 语法（每行一条，与 v1 兼容）:
+#     绝对路径 [参数...] [&]
+#     - 行尾带 "&"  -> 后台启动，不等待，适合常驻业务（本程序）；
+#                      由 launcher 监督：waitpid + kill(pid,0) 双重判定回收。
+#     - 行尾带 "&!" -> 后台启动，收到程序完成标记后等 5 秒重新启动；适合分段录像。
+#     - 不带 "&"    -> 前台启动，等它退出后才执行下一行，适合初始化类程序。
+#     - 以 '#' 开头或空行 -> 注释，被忽略。
+#     - 每行总长不超过 511 字符，token 数不超过 31 个（路径 + 最多 31 个参数）。
+#     - 解析器不做引号/转义：参数里不能有空格。
+#
+# 更新方式：直接替换 /sdcard/app/ 下对应 ELF（或改本清单），重启即生效。
+#   前提：开机自启命令指向文件系统路径
+#     RT-Smart Configuration -> Rtsmart auto execute command string = /sdcard/app/launcher
+#   而不是 @preload / fastboot 快起：快起跑的是烧在镜像固定位置的 rtapp 备份，
+#   根本不读文件系统，替换 SD 卡文件无效（secure boot 下强制 @preload，本方案不可用）。
+#
+# ----------------------------------------------------------------------------
+# 【硬约束】本清单里只允许出现**一条** dart_vision
+#
+# v1 现场证据（2025-09-16，7 次开机、28 次前台启动）：清单里放多条同类程序时，
+# 5 个实例几乎同时抢 VB/VICAP，只有 9 次写出日志，其余静默死掉，活下来的那个把
+# VB 占住，后面每个都撞 FATAL: vb_set_config。
+# v2 的相机 ACL 在 create() 里自建并独占 dart_media（全局 VB + VICAP/VB 池），
+# 因此"识别"与"录像"必须在同一个进程内完成（src/vision 单进程 payload）；
+# 拆成两个 ELF 就需要先设计帧共享通道，当前没有。
+# 一次上电只放一条，换配置就改这一行。
+# ----------------------------------------------------------------------------
+
+# ---- 本轮启用项：识别 + 录像（单进程独占 VICAP）----
+# 日志:  /sdcard/app/logs/dart_vision.log（状态与耗时两行共用一次 fsync；launcher 另写
+#        /sdcard/app/logs/launcher.log 与 dart_vision.console.log）
+# 录像:  /sdcard/app/records/rec_NNNN/img/frame_XXXXXXXX.pgm（灰度取证图，目标 30 FPS）
+#        /sdcard/app/records/rec_0001/logs/frames.csv（每帧一行的放行记录）
+# 识别:  /sdcard/app/records/detection.csv（每帧一行：目标/质心/扫描窗口/候选数）
+#
+# 参数含义（全部在 src/vision/main.cpp 的 usage 里有；默认值一律 UNVALIDATED）：
+#   --acq 1280x720 --fps 90    传感器模式。v2 ACL 精确匹配、无静默回退，模式写错
+#                              会在 camera_create 阶段报 E_INVALID/UNSUPPORTED 并退出。
+#                              v1 在该板 gc2093 上验证过的档位是
+#                              1920x1080@30 / 1920x1080@60 / 1280x960@90 / 1280x720@90，
+#                              本配置请求 720p90；输出保持 1280x720，不缩放。
+#   --csi 2                    本项目历史板端工程的 GC2093 接在 CSI2；显式指定，
+#                              避免落到 dart_vision 的通用默认值 CSI0。
+#   --exp 250                  固定曝光微秒（发光目标往小取，避免过曝扩散影响质心）。
+#                              0 = 保持未定，固定模式下会阻塞取帧；自动曝光用 --ae。
+#   --record on --rec-fps 30   目标每秒 30 张 PGM，按接收时间采样，与采集帧率独立；
+#                              写盘在录像线程，输入不足或写盘忙时实际帧率会降低，
+#                              队列满即丢并计数（rec_busy），不阻塞采集。
+#   --rec-keep 2             新建录像前只保留最近一轮，生成后最多两轮；
+#                              旧轮次会从板端删除，需长期保存的录像先复制到主机。
+#   --det-csv .../detection.csv  识别结果 CSV；= off 关闭。板端复盘识别必须留它。
+#   --seconds 90               每轮录 90 秒后干净退出；launcher 再启动新轮次：
+#                              录像线程收尾取净 → 排空租约 → camera.stop →
+#                              销毁相机 → 摘要行 "step=summary"。一轮上电即可同时
+#                              回答：有没有拉起来 / 采集通不通 / 识别有没有目标 /
+#                              录像落没落盘 / 收尾干不干净。
+/sdcard/app/dart_vision --acq 1280x720 --fps 90 --csi 2 --exp 250 --vision on --record on --rec-fps 30 --rec-keep 2 --rec-format pgm --rec-dir /sdcard/app/records --det-csv /sdcard/app/records/detection.csv --seconds 90 &!
+
+# ---- 先手动验证，再交给 launcher（强建议）----
+# 上电前先在 msh 里手跑一条，确认模式/曝光/路径都对，再把它放进自启清单：
+#   msh> /sdcard/app/launcher -t                      # 只校验清单，不启动任何进程
+#   msh> /sdcard/app/dart_vision --csi 2 --seconds 10 --record off   # 只验证采集+识别
+#   msh> /sdcard/app/dart_vision --csi 2 --seconds 10   # 再验证录像落盘
+# 手工验证时不要和 launcher 同时跑：两者都会独占 VICAP。
+
+# ---- 换档示例（一次只改一个变量）----
+# 只识别不录像（不拷贝、不建录像线程；release 由采集线程直接做）:
+# /sdcard/app/dart_vision --exp 250 --vision on --record off --seconds 90 &
+
+# 只录像不识别（量采集+写盘开销的基线）:
+# /sdcard/app/dart_vision --exp 250 --vision off --record on --rec-fps 30 --seconds 90 &
+
+# 二值化取证（不写 PGM，写按阈值打包的 PBM，体积小、直接就是识别器看到的图）:
+# /sdcard/app/dart_vision --exp 250 --record on --rec-format pbm --threshold 128 --seconds 90 &
+
+# 自动曝光对照（--ae 与 --exp 互斥）:
+# /sdcard/app/dart_vision --ae --record off --seconds 60 &
+
+# 高帧率档（带宽余量最大，v1 该传感器上验证过的档位）:
+# /sdcard/app/dart_vision --acq 1280x720 --fps 90 --exp 250 --record on --rec-fps 4 --seconds 90 &
+
+# 长跑稳定性（30 分钟，无 --seconds 时只能靠 SIGINT/SIGTERM 或 --max-acquire-errors 退出）:
+# /sdcard/app/dart_vision --acq 1920x1080 --fps 30 --exp 250 --record on --rec-fps 4 --seconds 1800 &
+
+# ---- 调试工具（手动跑，别自启）----
+# launcher 自身：
+
+#   msh> /sdcard/app/launcher -h                      # 用法
+#   msh> /sdcard/app/launcher -t /tmp/my.list         # 校验另一份清单
+#   msh> /sdcard/app/launcher -n                      # 拉起后不进入监督，立即返回
+
+# 空清单（只有注释）时 launcher 启动后正常退出，可用于"只验证自启命令指向对不对"。

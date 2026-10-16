@@ -109,38 +109,20 @@ int dart_camera_cleanup_output_pool(dart_camera_output_pool_t* pool, uint32_t* s
             }
             pool->mappings[i].address = NULL;
         }
-        if (pool->mappings[i].block_held) {
-            const k_s32 rc = kd_mpi_vb_release_block(pool->mappings[i].block);
-            if (rc != 0) {
-                if (primary == DART_CAMERA_OK) {
-                    primary = rc;
-                }
-                continue;
-            }
-            pool->mappings[i].block_held = 0;
-            pool->mappings[i].block = 0;
-        }
         pool->mappings[i].physical = 0;
     }
     if (primary != DART_CAMERA_OK) {
         *state = DART_CAMERA_STATE_FAULTED;
         return primary;
     }
-    if (pool->pool_id >= 0) {
-        const k_s32 rc = kd_mpi_vb_destory_pool((k_u32)pool->pool_id);
-        if (rc != 0) {
-            *state = DART_CAMERA_STATE_FAULTED;
-            return rc;
-        }
-    }
     *pool = (dart_camera_output_pool_t)DART_CAMERA_OUTPUT_POOL_INITIALIZER;
     return DART_CAMERA_OK;
 }
 
 int dart_camera_prepare_output_pool(
-    dart_camera_output_pool_t* pool, uint32_t block_bytes, uint32_t channel_buffers,
-    uint32_t* state) {
-    if (pool == NULL || state == NULL || block_bytes == 0) {
+    dart_camera_output_pool_t* pool, uint32_t pool_id, uint32_t block_bytes,
+    uint32_t channel_buffers, uint32_t* state) {
+    if (pool == NULL || state == NULL || block_bytes == 0 || pool_id >= VB_MAX_POOLS) {
         return DART_CAMERA_E_INVALID_ARGUMENT;
     }
     if (channel_buffers < 3 || channel_buffers > DART_CAMERA_MAX_BUFFERS) {
@@ -149,56 +131,46 @@ int dart_camera_prepare_output_pool(
     if (pool->pool_id >= 0) {
         return DART_CAMERA_E_BUSY;
     }
-    k_vb_pool_config config = {0};
-    config.blk_size = block_bytes;
-    config.blk_cnt = channel_buffers;
-    config.mode = VB_REMAP_MODE_NONE;
-    const k_s32 pool_id = kd_mpi_vb_create_pool(&config);
-    if (pool_id < 0) {
-        if (pool_id == (k_s32)VB_INVALID_POOLID) {
-            return DART_CAMERA_E_POOL_CREATE_FAILED;
-        }
-        return pool_id;
-    }
-    pool->pool_id = pool_id;
+    pool->pool_id = (int32_t)pool_id;
     pool->block_bytes = block_bytes;
     pool->buffer_count = channel_buffers;
     int primary = DART_CAMERA_OK;
-    /* Hold every block until enumeration is complete so each mapping belongs
-     * to a distinct block. Releasing early could return the same block again.
+    /* k_vb_comm.h defines handles as pool_id:16 | block_id:16. Query existing
+     * blocks without acquiring them: VICAP may already hold every block. Check
+     * both directions through the public VB API before mapping any address.
      */
     for (uint32_t i = 0; i < channel_buffers; ++i) {
-        const k_vb_blk_handle block = kd_mpi_vb_get_block((k_u32)pool_id, block_bytes, NULL);
-        if (block == VB_INVALID_HANDLE) {
-            primary = DART_CAMERA_E_BLOCK_EXHAUSTED;
+        const k_vb_blk_handle block = (pool_id << 16u) | i;
+        if (kd_mpi_vb_handle_to_pool_id(block) != (k_s32)pool_id) {
+            primary = DART_CAMERA_E_FRAME_POOL_MISMATCH;
             goto rollback;
         }
-        pool->mappings[i].block = block;
-        pool->mappings[i].block_held = 1;
         pool->mappings[i].physical = kd_mpi_vb_handle_to_phyaddr(block);
-        if (pool->mappings[i].physical == 0) {
+        const uint64_t physical = pool->mappings[i].physical;
+        if (physical == 0 || physical > UINT64_MAX - block_bytes ||
+            kd_mpi_vb_phyaddr_to_handle(physical) != block) {
             primary = DART_CAMERA_E_MAP_FAILED;
             goto rollback;
         }
-        pool->mappings[i].address = kd_mpi_sys_mmap_cached(pool->mappings[i].physical, block_bytes);
+        for (uint32_t j = 0; j < i; ++j) {
+            const uint64_t other = pool->mappings[j].physical;
+            const uint64_t distance = physical > other ? physical - other : other - physical;
+            if (distance < block_bytes) {
+                primary = DART_CAMERA_E_FRAME_GEOMETRY_MISMATCH;
+                goto rollback;
+            }
+        }
+        pool->mappings[i].address = kd_mpi_sys_mmap_cached(physical, block_bytes);
         if (pool->mappings[i].address == NULL) {
             primary = DART_CAMERA_E_MAP_FAILED;
             goto rollback;
         }
-    }
-    for (uint32_t i = 0; i < channel_buffers; ++i) {
-        const k_s32 rc = kd_mpi_vb_release_block(pool->mappings[i].block);
-        if (rc != 0) {
-            primary = rc;
-            goto rollback;
-        }
-        pool->mappings[i].block_held = 0;
-        pool->mappings[i].block = 0;
     }
     return DART_CAMERA_OK;
 
 rollback:
     /* Cleanup alone records FAULTED; its code must not replace the primary. */
     (void)dart_camera_cleanup_output_pool(pool, state);
+    pool->block_bytes = block_bytes;
     return primary;
 }

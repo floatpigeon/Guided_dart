@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "mpi_sys_api.h"
+#include "mpi_vb_api.h"
 #include "mpi_vicap_api.h"
 
 static int valid_camera(const dart_camera_t* camera) {
@@ -72,9 +73,6 @@ static int frame_geometry_valid(const dart_camera_t* camera,
         source->compress_mode != COMPRESS_MODE_NONE) {
         return DART_CAMERA_E_FRAME_GEOMETRY_MISMATCH;
     }
-    if (info->pool_id != (uint32_t)camera->output_pool.pool_id) {
-        return DART_CAMERA_E_FRAME_POOL_MISMATCH;
-    }
     *length = bytes;
     return DART_CAMERA_OK;
 }
@@ -94,6 +92,54 @@ static void* find_mapping(const dart_camera_t* camera, uint64_t physical,
         }
     }
     return NULL;
+}
+
+int dart_camera_prepare_frame_mappings(dart_camera_t* camera) {
+    if (!valid_camera(camera) || !camera->stream_started) {
+        return DART_CAMERA_E_INVALID_STATE;
+    }
+    if (camera->output_pool.pool_id >= 0) return DART_CAMERA_OK;
+
+    const uint32_t slot = 0;
+    int result = DART_CAMERA_E_NO_FRAME;
+    for (uint32_t attempt = 0; attempt < 3; ++attempt) {
+        const k_s32 rc = kd_mpi_vicap_dump_frame(VICAP_DEV_ID_0, VICAP_CHN_ID_0,
+            VICAP_DUMP_YUV, &camera->frame_info[slot], 1000u);
+        if (rc == 0) {
+            camera->frame_held[slot] = 1;
+            result = DART_CAMERA_OK;
+            break;
+        }
+        if (rc != K_ERR_VICAP_BUF_EMPTY && rc != K_ERR_VICAP_NOTREADY) return rc;
+    }
+    if (result != DART_CAMERA_OK) return result;
+
+    const k_video_frame_info* info = &camera->frame_info[slot];
+    uint64_t length = 0;
+    result = frame_geometry_valid(camera, info, &length);
+    if (result == DART_CAMERA_OK) {
+        const k_vb_blk_handle block = kd_mpi_vb_phyaddr_to_handle(info->v_frame.phys_addr[0]);
+        const k_s32 pool_id = kd_mpi_vb_handle_to_pool_id(block);
+        if (block == VB_INVALID_HANDLE || pool_id < 0 || pool_id >= VB_MAX_POOLS) {
+            result = DART_CAMERA_E_FRAME_POOL_MISMATCH;
+        } else {
+            /* The SDK's frame-info pool_id is not reliable on this build. The
+             * VB handle obtained from the physical address is authoritative. */
+            result = dart_camera_prepare_output_pool(&camera->output_pool,
+                (uint32_t)pool_id, camera->output_pool.block_bytes,
+                camera->config.channel_buffers, &camera->state);
+        }
+    }
+    if (result == DART_CAMERA_OK &&
+        find_mapping(camera, info->v_frame.phys_addr[0], length) == NULL) {
+        result = DART_CAMERA_E_FRAME_NOT_MAPPED;
+    }
+    const int cleanup = dart_camera_release_dump(camera, slot);
+    if (cleanup != DART_CAMERA_OK) {
+        camera->state = DART_CAMERA_STATE_FAULTED;
+        if (result == DART_CAMERA_OK) result = cleanup;
+    }
+    return result;
 }
 
 int dart_camera_acquire_frame(dart_camera_t* camera, uint32_t timeout_ms,
@@ -131,6 +177,12 @@ int dart_camera_acquire_frame(dart_camera_t* camera, uint32_t timeout_ms,
     uint64_t length = 0;
     result = frame_geometry_valid(camera, &camera->frame_info[slot], &length);
     if (result != DART_CAMERA_OK) return abandon_frame(camera, slot, result, frame);
+    const k_vb_blk_handle block = kd_mpi_vb_phyaddr_to_handle(
+        camera->frame_info[slot].v_frame.phys_addr[0]);
+    if (block == VB_INVALID_HANDLE || camera->output_pool.pool_id < 0 ||
+        kd_mpi_vb_handle_to_pool_id(block) != camera->output_pool.pool_id) {
+        return abandon_frame(camera, slot, DART_CAMERA_E_FRAME_POOL_MISMATCH, frame);
+    }
     const k_video_frame* source = &camera->frame_info[slot].v_frame;
     void* mapped = find_mapping(camera, source->phys_addr[0], length);
     if (mapped == NULL) {

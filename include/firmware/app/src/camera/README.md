@@ -55,7 +55,12 @@ finished. This slice reserves DEV0/CHN0 and allows one attached camera per owner
 No application-level mutable global state is used to pretend these resources
 are independent.
 
-The camera owns a private output pool and maps every block before streaming.
+VICAP owns its output pool. During start, the camera uses one startup dump to
+identify that pool, validates each existing block through the public VB handle
+queries, and maps every block before returning to the application. The SDK's
+documented pool/block handle encoding is used only for these startup queries;
+no blocks are taken from VICAP or released through the VB API. Camera teardown
+unmaps all blocks before VICAP deinit frees its pool.
 Acquisition returns read-only Y8 luma, not full NV12. DMA writes the pixels; the
 ACL invalidates cache on every acquisition. No application allocation, mapping,
 unmapping or pixel copy occurs in acquire/release. `stride` may exceed `width`.
@@ -140,7 +145,7 @@ adapter probe and expected probe with the local SDK. Actual board execution is
 The v1 diagnostic executable is removed. A v2 board diagnostic is outside this
 round; choose a sensor-supported mode and calibrated exposure for board validation.
 
-Board acceptance must verify private pool compatibility, cache freshness under
+Board acceptance must verify SDK pool compatibility, cache freshness under
 DMA, stable frame timing, actual exposure/line quantization, warm restart and
 cleanup/release failures. Correlate raw PTS with a known timing reference and
 inspect real images; compile/link success and a single luma sample are not

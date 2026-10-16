@@ -42,4 +42,7 @@ int dart_camera_release_dump(dart_camera_t* camera, uint32_t slot);
  */
 uint32_t dart_camera_held_frames(const dart_camera_t* camera);
 
+/* Startup-only dump discovery and mapping; no public lease is issued. */
+int dart_camera_prepare_frame_mappings(dart_camera_t* camera);
+
 #endif

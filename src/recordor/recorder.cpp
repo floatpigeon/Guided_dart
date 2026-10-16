@@ -1,6 +1,4 @@
-/* 录像垂直切片：声明与实现合并为单个翻译单元（原 recorder.hpp 已并入本文件）。
- *
- * 只接收相机 ACL 的 FrameLease，不含 K230/MPP/VENC 头文件；输入帧在写线程中
+/* 只接收相机 ACL 的 FrameLease，不含 K230/MPP/VENC 头文件；输入帧在写线程中
  * 拷贝为紧凑 Y8，再写成 PGM（或阈值打包后的 PBM）。硬件 H.264 需要后续独立的
  * video ACL，不会把厂商句柄带入这个上层模块。
  *
@@ -20,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -80,8 +79,9 @@ enum class Error : std::uint8_t {
 struct Config {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
-    /* Sampling is checked before queue availability: 240 Hz / 4 ~= 60 Hz. */
-    std::uint32_t sample_every_n = 4;
+    /* Target images per second, sampled using the monotonic receipt timestamp.
+     * Checked before queue availability; busy slots still drop without waiting. */
+    std::uint32_t fps = 30;
     /* Hard image-slot cap; a slot stays busy through copy and file write. */
     std::uint32_t queue_slots = 2;
     /* Separate bounded metadata queue for one CSV row per enqueued submission; drops
@@ -91,6 +91,7 @@ struct Config {
     std::uint8_t pbm_threshold = 128;
     std::chrono::milliseconds flush_period{1000};
     std::string_view output_directory = "records";
+    std::uint32_t keep_sessions = 0; /* 0 = never remove earlier sessions */
     FrameEventSink event_sink = nullptr;
     void* event_sink_context = nullptr;
 };
@@ -138,6 +139,8 @@ public:
 
     bool started() const noexcept;
     Error last_error() const noexcept { return last_error_.load(std::memory_order_acquire); }
+    int last_system_error() const noexcept { return last_system_error_; }
+    const char* last_error_path() const noexcept { return last_error_path_; }
     static std::string_view error_text(Error error) noexcept;
     static std::string_view decision_text(EventDecision decision) noexcept;
     Stats stats() const noexcept;
@@ -165,6 +168,9 @@ private:
     bool validate_config() noexcept;
     bool allocate_buffers() noexcept;
     bool open_session() noexcept;
+    bool scan_sessions(const char* root, std::uint32_t& count,
+                       std::uint32_t& oldest, std::uint32_t& newest) noexcept;
+    bool remove_session(const char* root, std::uint32_t index) noexcept;
     void close_session() noexcept;
     bool valid_view(const camera::FrameView& view) const noexcept;
     bool enqueue_event(const FrameEvent& event) noexcept;
@@ -183,6 +189,11 @@ private:
     void maybe_flush_events(bool force) noexcept;
     void set_error(Error error) noexcept {
         last_error_.store(error, std::memory_order_release);
+    }
+    void set_file_error(Error error, const char* path) noexcept {
+        last_system_error_ = errno;
+        std::snprintf(last_error_path_, sizeof(last_error_path_), "%s", path);
+        set_error(error);
     }
 
     Config config_{};
@@ -225,6 +236,8 @@ private:
     std::FILE* event_file_ = nullptr;
     std::chrono::steady_clock::time_point last_event_flush_{};
     std::atomic<Error> last_error_{Error::kNone};
+    int last_system_error_ = 0;
+    char last_error_path_[kMaxPath]{};
     std::atomic<std::uint64_t> input_{0};
     std::atomic<std::uint64_t> accepted_{0};
     std::atomic<std::uint64_t> copied_{0};
@@ -238,7 +251,7 @@ private:
     std::atomic<std::uint64_t> event_dropped_{0};
     std::atomic<std::uint64_t> lease_release_fail_{0};
     std::atomic<std::uint64_t> bytes_{0};
-    std::atomic<std::uint64_t> sample_counter_{0};
+    std::atomic<std::uint64_t> next_sample_tick_{0};
     std::atomic<std::uint32_t> queue_high_water_{0};
 };
 
@@ -252,6 +265,25 @@ bool mkdir_if_needed(const char* path) noexcept {
     if (errno != EEXIST) return false;
     struct stat st{};
     return ::stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+std::uint32_t session_number(const char* name) noexcept {
+    if (std::strlen(name) != 8 || std::memcmp(name, "rec_", 4) != 0) return 0;
+    std::uint32_t number = 0;
+    for (int i = 4; i < 8; ++i) {
+        if (name[i] < '0' || name[i] > '9') return 0;
+        number = number * 10U + static_cast<std::uint32_t>(name[i] - '0');
+    }
+    return number;
+}
+
+bool recorder_file_name(const char* name, bool image) noexcept {
+    if (!image) return std::strcmp(name, "frames.csv") == 0;
+    if (std::strlen(name) != 18 || std::memcmp(name, "frame_", 6) != 0) return false;
+    for (int i = 6; i < 14; ++i)
+        if (name[i] < '0' || name[i] > '9') return false;
+    return std::strcmp(name + 14, ".pgm") == 0 ||
+           std::strcmp(name + 14, ".pbm") == 0;
 }
 
 bool checked_frame_bytes(std::uint32_t width, std::uint32_t height,
@@ -290,10 +322,11 @@ bool Recorder::validate_config() noexcept {
         set_error(Error::kInvalidConfig);
         return false;
     }
-    if (config_.sample_every_n == 0 || config_.queue_slots == 0 ||
+    if (config_.fps == 0 || config_.fps > 1000000 || config_.queue_slots == 0 ||
         config_.queue_slots > kMaxQueueSlots || config_.event_slots == 0 ||
         config_.event_slots > kMaxEventSlots || config_.output_directory.empty() ||
-        config_.output_directory.size() >= kMaxPath || config_.flush_period.count() < 0) {
+        config_.output_directory.size() >= kMaxPath || config_.flush_period.count() < 0 ||
+        config_.keep_sessions > 9999) {
         set_error(config_.output_directory.size() >= kMaxPath ? Error::kPathTooLong
                                                                : Error::kInvalidConfig);
         return false;
@@ -331,33 +364,206 @@ bool Recorder::allocate_buffers() noexcept {
     return true;
 }
 
+bool Recorder::scan_sessions(const char* root, std::uint32_t& count,
+                             std::uint32_t& oldest, std::uint32_t& newest) noexcept {
+    DIR* dir = ::opendir(root);
+    if (dir == nullptr) {
+        set_file_error(Error::kDirectory, root);
+        return false;
+    }
+    count = oldest = newest = 0;
+    for (;;) {
+        errno = 0;
+        const dirent* entry = ::readdir(dir);
+        if (entry == nullptr) {
+            if (errno != 0) {
+                set_file_error(Error::kDirectory, root);
+                ::closedir(dir);
+                return false;
+            }
+            break;
+        }
+        const std::uint32_t number = session_number(entry->d_name);
+        if (number == 0) continue;
+        char path[kMaxPath]{};
+        const int n = std::snprintf(path, sizeof(path), "%s/%s", root, entry->d_name);
+        if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(path)) {
+            set_error(Error::kPathTooLong);
+            ::closedir(dir);
+            return false;
+        }
+        struct stat st{};
+        if (::lstat(path, &st) != 0) {
+            set_file_error(Error::kDirectory, path);
+            ::closedir(dir);
+            return false;
+        }
+        if (!S_ISDIR(st.st_mode)) continue;
+        ++count;
+        if (oldest == 0 || number < oldest) oldest = number;
+        if (number > newest) newest = number;
+    }
+    ::closedir(dir);
+    return true;
+}
+
+bool Recorder::remove_session(const char* root, std::uint32_t index) noexcept {
+    char path[kMaxPath]{};
+    const int n = std::snprintf(path, sizeof(path), "%s/rec_%04u", root, index);
+    if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(path)) {
+        set_error(Error::kPathTooLong);
+        return false;
+    }
+    DIR* session = ::opendir(path);
+    if (session == nullptr) {
+        set_file_error(Error::kDirectory, path);
+        return false;
+    }
+    for (;;) {
+        errno = 0;
+        const dirent* entry = ::readdir(session);
+        if (entry == nullptr) {
+            if (errno != 0) {
+                set_file_error(Error::kDirectory, path);
+                ::closedir(session);
+                return false;
+            }
+            break;
+        }
+        if (std::strcmp(entry->d_name, ".") == 0 ||
+            std::strcmp(entry->d_name, "..") == 0) continue;
+        if (std::strcmp(entry->d_name, "img") != 0 &&
+            std::strcmp(entry->d_name, "logs") != 0) {
+            errno = EPERM;
+            set_file_error(Error::kDirectory, path);
+            ::closedir(session);
+            return false;
+        }
+    }
+    ::closedir(session);
+    // Validate both subdirectories before deleting anything. Unknown files are never removed.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int kind = 0; kind < 2; ++kind) {
+            const bool image = kind == 0;
+            char subdir[kMaxPath]{};
+            const int sub_n = std::snprintf(subdir, sizeof(subdir), "%s/%s", path,
+                                            image ? "img" : "logs");
+            if (sub_n <= 0 || static_cast<std::size_t>(sub_n) >= sizeof(subdir)) {
+                set_error(Error::kPathTooLong);
+                return false;
+            }
+            DIR* dir = ::opendir(subdir);
+            if (dir == nullptr) {
+                if (errno == ENOENT) continue; // A reset may leave an incomplete session.
+                set_file_error(Error::kDirectory, subdir);
+                return false;
+            }
+            struct stat dir_st{};
+            if (::lstat(subdir, &dir_st) != 0) {
+                set_file_error(Error::kDirectory, subdir);
+                ::closedir(dir);
+                return false;
+            }
+            if (!S_ISDIR(dir_st.st_mode)) {
+                errno = EPERM;
+                set_file_error(Error::kDirectory, subdir);
+                ::closedir(dir);
+                return false;
+            }
+            for (;;) {
+                errno = 0;
+                const dirent* entry = ::readdir(dir);
+                if (entry == nullptr) {
+                    if (errno != 0) {
+                        set_file_error(Error::kDirectory, subdir);
+                        ::closedir(dir);
+                        return false;
+                    }
+                    break;
+                }
+                if (std::strcmp(entry->d_name, ".") == 0 ||
+                    std::strcmp(entry->d_name, "..") == 0) continue;
+                char file[kMaxPath]{};
+                const int file_n = std::snprintf(file, sizeof(file), "%s/%s", subdir,
+                                                 entry->d_name);
+                if (file_n <= 0 || static_cast<std::size_t>(file_n) >= sizeof(file)) {
+                    set_error(Error::kPathTooLong);
+                    ::closedir(dir);
+                    return false;
+                }
+                if (!recorder_file_name(entry->d_name, image)) {
+                    errno = EPERM;
+                    set_file_error(Error::kDirectory, file);
+                    ::closedir(dir);
+                    return false;
+                }
+                struct stat st{};
+                if (::lstat(file, &st) != 0) {
+                    set_file_error(Error::kDirectory, file);
+                    ::closedir(dir);
+                    return false;
+                }
+                if (!S_ISREG(st.st_mode)) {
+                    errno = EPERM;
+                    set_file_error(Error::kDirectory, file);
+                    ::closedir(dir);
+                    return false;
+                }
+                if (pass == 1 && ::unlink(file) != 0) {
+                    set_file_error(Error::kDirectory, file);
+                    ::closedir(dir);
+                    return false;
+                }
+            }
+            ::closedir(dir);
+            if (pass == 1 && ::rmdir(subdir) != 0) {
+                set_file_error(Error::kDirectory, subdir);
+                return false;
+            }
+        }
+    }
+    if (::rmdir(path) != 0) {
+        set_file_error(Error::kDirectory, path);
+        return false;
+    }
+    return true;
+}
+
 bool Recorder::open_session() noexcept {
     const auto root = config_.output_directory;
     char root_path[kMaxPath]{};
     std::memcpy(root_path, root.data(), root.size());
     root_path[root.size()] = '\0';
     if (!mkdir_if_needed(root_path)) {
-        set_error(Error::kDirectory);
+        set_file_error(Error::kDirectory, root_path);
         return false;
     }
+    std::uint32_t count = 0, oldest = 0, newest = 0;
+    if (!scan_sessions(root_path, count, oldest, newest)) return false;
+    while (config_.keep_sessions > 0 && count >= config_.keep_sessions) {
+        if (!remove_session(root_path, oldest) ||
+            !scan_sessions(root_path, count, oldest, newest)) return false;
+    }
     bool created = false;
-    for (std::uint32_t i = 1; i <= 9999; ++i) {
+    for (std::uint32_t offset = 0; offset < 9999; ++offset) {
+        const std::uint32_t i = (newest + offset) % 9999U + 1U;
         const int n = std::snprintf(session_dir_, sizeof(session_dir_), "%.*s/rec_%04u",
                                     static_cast<int>(root.size()), root.data(), i);
         if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(session_dir_)) {
             set_error(Error::kPathTooLong);
             return false;
         }
-        if (::access(session_dir_, F_OK) == 0) continue;
-        if (!mkdir_if_needed(session_dir_)) {
-            set_error(Error::kDirectory);
+        if (::mkdir(session_dir_, 0777) != 0) {
+            if (errno == EEXIST) continue;
+            set_file_error(Error::kDirectory, session_dir_);
             return false;
         }
         created = true;
         break;
     }
     if (!created) {
-        set_error(Error::kDirectory);
+        errno = ENOSPC;
+        set_file_error(Error::kDirectory, root_path);
         return false;
     }
 
@@ -368,22 +574,29 @@ bool Recorder::open_session() noexcept {
     if (image_n <= 0 || log_n <= 0 || event_n <= 0 ||
         static_cast<std::size_t>(image_n) >= sizeof(image_dir_) ||
         static_cast<std::size_t>(log_n) >= sizeof(log_dir) ||
-        static_cast<std::size_t>(event_n) >= sizeof(event_path_) ||
-        !mkdir_if_needed(log_dir) || !mkdir_if_needed(image_dir_)) {
-        set_error(Error::kDirectory);
+        static_cast<std::size_t>(event_n) >= sizeof(event_path_)) {
+        set_error(Error::kPathTooLong);
+        return false;
+    }
+    if (!mkdir_if_needed(log_dir)) {
+        set_file_error(Error::kDirectory, log_dir);
+        return false;
+    }
+    if (!mkdir_if_needed(image_dir_)) {
+        set_file_error(Error::kDirectory, image_dir_);
         return false;
     }
     event_file_ = std::fopen(event_path_, "w");
     if (event_file_ == nullptr) {
-        set_error(Error::kEventFile);
+        set_file_error(Error::kEventFile, event_path_);
         return false;
     }
     if (event_buffer_)
         (void)std::setvbuf(event_file_, event_buffer_.get(), _IOFBF, kEventBufferBytes);
     std::fprintf(event_file_,
-                 "# recorder format=1 width=%u height=%u sample_every_n=%u session=%s\n"
+                 "# recorder format=1 width=%u height=%u fps=%u session=%s\n"
                  "input_index,source_sequence,source_pts,source_pts_timebase_validated,received_us,decision,image_index,image_file\n",
-                 config_.width, config_.height, config_.sample_every_n, session_dir_);
+                 config_.width, config_.height, config_.fps, session_dir_);
     std::fflush(event_file_);
     last_event_flush_ = std::chrono::steady_clock::now();
     return true;
@@ -403,6 +616,8 @@ bool Recorder::start() noexcept {
         return false;
     }
     set_error(Error::kNone);
+    last_system_error_ = 0;
+    last_error_path_[0] = '\0';
     if (!validate_config() || !allocate_buffers() || !open_session()) {
         close_session();
         return false;
@@ -412,6 +627,7 @@ bool Recorder::start() noexcept {
         image_head_ = image_tail_ = image_count_ = 0;
         release_head_ = release_tail_ = release_count_ = 0;
         next_image_index_ = 1;
+        next_sample_tick_.store(0, std::memory_order_relaxed);
         accepting_ = true;
     }
     {
@@ -516,10 +732,22 @@ Admission Recorder::try_submit(camera::FrameLease&& lease) noexcept {
     };
 
     if (view_ptr == nullptr) return finish(Admission::kInvalidFrame, EventDecision::kInvalidFrame);
-    const std::uint64_t ordinal = sample_counter_.fetch_add(1, std::memory_order_relaxed);
-    if ((ordinal % config_.sample_every_n) != 0)
+    if (!started_once_.load(std::memory_order_acquire))
+        return finish(Admission::kStopped, EventDecision::kStopped);
+    if (!valid_view(*view_ptr) || event.received_us < 0)
+        return finish(Admission::kInvalidFrame, EventDecision::kInvalidFrame);
+
+    /* One image per 1/fps CLOCK_MONOTONIC interval, independent of input FPS.
+     * Split seconds and microseconds to avoid overflow and integer-period drift.
+     * Advance before the queue check: missed/busy intervals are never caught up
+     * by a burst of writes when capture or storage resumes. */
+    const auto received_us = static_cast<std::uint64_t>(event.received_us);
+    const std::uint64_t tick = (received_us / 1000000U) * config_.fps +
+                              (received_us % 1000000U) * config_.fps / 1000000U;
+    auto next_tick = next_sample_tick_.load(std::memory_order_relaxed);
+    if (tick < next_tick || !next_sample_tick_.compare_exchange_strong(
+                               next_tick, tick + 1U, std::memory_order_relaxed))
         return finish(Admission::kDownsampled, EventDecision::kDownsampled);
-    if (!valid_view(*view_ptr)) return finish(Admission::kInvalidFrame, EventDecision::kInvalidFrame);
 
     /* No condition-variable wait, and even the queue mutex is try-locked. */
     std::unique_lock<std::mutex> lock(image_mutex_, std::try_to_lock);

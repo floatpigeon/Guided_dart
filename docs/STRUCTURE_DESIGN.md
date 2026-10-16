@@ -49,18 +49,26 @@ L1  BSP/HAL/MPP（厂商 C）
 - 初始化失败拆成 `create/init/start`，不在构造函数中打印、退出或抛异常。
 - 在交叉工具链探针和实际链接验证通过前，不假设 `std::expected` 或 `-fno-exceptions` 可用。
 
-## 3. 目录职责（目标布局）
+## 3. 目录职责
+
+实际布局（2026-10 更新，**不使用 `apps/` 目录**：可执行与库目标统一在
+`src/CMakeLists.txt` 声明，模块子目录只放源码与 README）：
 
 ```
 src/                        业务实现（C++ 编排 + C 热路径实现）
-  vision/ detection/        C 数据面优先，公开稳定 C ABI
-  control/                  C++ 观测器、状态机、外环/内环和分配
-  recording/                C 数据面录像/取证队列，C++ 负责策略
-include/                    与 src/components 对应的公共接口
-cmake/                      工具链和链接脚本
-scripts/                    构建、部署和受控的板端辅助脚本
+  detector/                 检测 + ROI（dart_detection，STATIC；detector.cpp + roi.cpp）
+  recordor/                 灰度取证录像（dart_recording；单翻译单元 recorder.cpp）
+  launcher/                 开机自启器（平台无关 C11）+ startup.list 清单母版
+  vision/                   组合根：相机 + 识别 + 录像单进程 payload（dart_vision）
+  control/                  目标：C++ 观测器、状态机、外环/内环和分配
+include/                    与 src 对应的公共接口 + 固件侧库目标声明（camera/spi/imu）
+cmake/                      交叉工具链配置（链接脚本取 SDK 的 libs/mk/link.lds）
+scripts/                    构建（build.sh）与部署（deploy.sh / deploy-sdcard.sh）
 docs/                       设计、标定、调试和验收契约
 ```
+
+启动链路的完整设计（清单语义、所有权、日志布局、v1 教训）见
+[`LAUNCHER_DESIGN.md`](LAUNCHER_DESIGN.md)。
 
 目前不要因为目录在文档中出现就创建空壳文件；实现任务应先选择一个垂直切片，补齐接口、CMake、日志和验证，再进入下一个模块。应用之间不得共享可变全局状态。
 
@@ -104,6 +112,9 @@ VICAP/传感器（ACL）
 
 ## 7. 禁止事项
 
-- `README.md` 中的 `apps/`、`scripts/`、`components/` 是仓库目标工作流；实现时应与顶层 CMake 保持一致，而不是恢复 v1 的单一 `self_guiding_dart` 工程。
+- 不恢复 v1 的 `apps/` 单一工程布局：可执行目标在 `src/CMakeLists.txt` 声明，模块
+  子目录只放源码；也不要把 v1 的 `self_guiding_dart` 整体搬回来。
+- 不要出现第二个持有 VICAP/VB 的进程：识别与录像必须在 `src/vision` 这一个 ELF 内
+  串联（v1 实测多实例抢资源必死），清单里也不能放第二条 payload。
 - 不要把外部仓库（包括 v1 或 RMCS）当作本仓库的依赖；只提炼设计原则并在本仓上下文重写。
 - 不要用主机兼容层伪造 MPP/VICAP/VENC 行为；硬件假设要由 ACL 和板端探针验证。

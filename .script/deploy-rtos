@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# ============================================================================
+# deploy-rtos —— 把编译产物上板到 /sdcard/app/
+#
+# 用法:
+#   deploy-rtos              上板全部：launcher + dart_vision + startup_final.list
+#   deploy-rtos launcher     只上板 launcher
+#   deploy-rtos dart_vision  只上板 dart_vision
+#   deploy-rtos list         只上板启动清单（startup_final.list）
+#   deploy-rtos --keep-logs  全量读卡器部署时保留日志和录像
+#   deploy-rtos -h           本帮助
+#
+# 默认通过 GIO/MTP 部署当前 USB 板子；也可通过环境变量或 board.env 指定:
+#   export BOARD_IP=192.168.1.100    -> ssh/scp 模式（需免密）
+#   export SDCARD=/media/$USER/<卡>  -> 读卡器模式（卡已挂载）
+#   export SDCARD='gphoto2://Kendryte_CanMV_001000000/store_ffff0001'
+#                                    -> 板子用 USB 挂着（MTP/gphoto2）= 板端 /sdcard
+#   均未设置时默认使用上面的 USB 地址，无需 export。
+#   可选: BOARD_USER(默认 root)、BOARD_DIR(默认 /sdcard/app)
+#         DART_BUILD_DIR（默认 build-cross；兼容旧变量 BUILD_DIR）
+#   也可以写进 .script/board.env（见 .script/board.env.example）
+#
+# 说明：网络模式做 md5 校验；读卡器模式先写临时名校验再替换。
+#       MTP 模式使用 GIO URI 上传和 SHA-256 回读校验，备份旧文件并保留日志、录像。
+# ============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=.script/_rtos-common.sh
+source "${SCRIPT_DIR}/_rtos-common.sh"
+
+usage() {
+    sed -n '/^# deploy-rtos /,/^# ===/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+TARGET=''
+KEEP_LOGS=0
+for arg in "$@"; do
+    case "${arg}" in
+    -h | --help) usage; exit 0 ;;
+    --keep-logs) KEEP_LOGS=1 ;;
+    launcher | dart_vision | list)
+        [[ -z "${TARGET}" ]] || die "只能指定一个目标"
+        TARGET="${arg}"
+        ;;
+    *) usage >&2; die "未知参数: ${arg}（可选 launcher | dart_vision | list | --keep-logs）" ;;
+    esac
+done
+
+# 统一选择和预检文件，三种传输方式使用同一套路径。
+NAMES=()
+SOURCES=()
+for name in launcher dart_vision list; do
+    [[ -z "${TARGET}" || "${TARGET}" == "${name}" ]] || continue
+    if [[ "${name}" == list ]]; then
+        NAMES+=(startup_final.list)
+        SOURCES+=("${REPO_ROOT}/src/launcher/startup.list")
+    else
+        NAMES+=("${name}")
+        SOURCES+=("$(rtos_artifact_path "${name}")")
+    fi
+done
+for src in "${SOURCES[@]}"; do
+    [[ -s "${src}" ]] || die "缺少非空产物: ${src}；先跑 build-rtos"
+done
+
+# MTP 始终走原生 GIO URI；不再经过读卡器脚本或向 GVfs FUSE 路径写文件。
+if [[ -z "${BOARD_IP:-}" ]]; then
+    SDCARD="${SDCARD:-gphoto2://Kendryte_CanMV_001000000/store_ffff0001}"
+    MTP_URI=''
+    LOCAL_PATH="$(rtos_resolve_local_path "${SDCARD}")"
+    case "${SDCARD}" in
+    gphoto2://* | mtp://*) MTP_URI="${SDCARD%/}" ;;
+    *)
+        if [[ "${LOCAL_PATH}" == */gvfs/* ]]; then
+            command -v gio >/dev/null || die "找不到 gio"
+            MTP_URI="$(LC_ALL=C gio info "${LOCAL_PATH}" | sed -n 's/^uri: //p')"
+            [[ -n "${MTP_URI}" ]] || die "无法取得 MTP URI: ${LOCAL_PATH}"
+        fi
+        ;;
+    esac
+    if [[ -n "${MTP_URI}" ]]; then
+        command -v gio >/dev/null || die "找不到 gio"
+        if ! gio info "${MTP_URI}" >/dev/null 2>&1; then
+            MTP_DEVICE="${MTP_URI#*://}"
+            MTP_DEVICE="${MTP_URI%%://*}://${MTP_DEVICE%%/*}/"
+            gio mount "${MTP_DEVICE}" || die "无法挂载 USB 板子，请连接并启动 CanMV 后重试"
+        fi
+        MTP_ARGS=()
+        [[ -z "${TARGET}" ]] || MTP_ARGS+=(--only "${TARGET}")
+        exec bash "${SCRIPT_DIR}/deploy-mtp.sh" "${MTP_URI}" "${MTP_ARGS[@]}"
+    fi
+fi
+
+command -v md5sum >/dev/null || die "找不到 md5sum"
+rtos_resolve_transport
+
+deploy_network() {
+    command -v scp >/dev/null || die "找不到 scp"
+    rtos_ssh "mkdir -p '${RTOS_DIR}/logs' '${RTOS_DIR}/records'"
+    local i dst local_md5 remote_md5
+    for i in "${!NAMES[@]}"; do
+        dst="${RTOS_DIR}/${NAMES[i]}"
+        scp -q "${SOURCES[i]}" "${BOARD_USER}@${RTOS_TARGET}:${dst}"
+        if [[ "${NAMES[i]}" != startup_final.list ]]; then
+            rtos_ssh "chmod 755 '${dst}'"
+        fi
+        local_md5="$(md5sum "${SOURCES[i]}" | cut -d' ' -f1)"
+        remote_md5="$(rtos_ssh "md5sum '${dst}'" 2>/dev/null | cut -d' ' -f1 || true)"
+        if [[ -n "${remote_md5}" && "${local_md5}" != "${remote_md5}" ]]; then
+            die "${NAMES[i]}: md5 校验失败"
+        fi
+        info "${NAMES[i]}: ${local_md5}${remote_md5:+ (板端一致)}"
+    done
+}
+
+same_file() {
+    [[ -f "$1" && -f "$2" ]] || return 1
+    [[ "$(stat -c %s "$1")" == "$(stat -c %s "$2")" ]] || return 1
+    [[ "$(md5sum "$1" | cut -d' ' -f1)" == "$(md5sum "$2" | cut -d' ' -f1)" ]]
+}
+
+deploy_card() {
+    mkdir -p "${RTOS_DIR}"
+    local probe i dst attempt ok chmod_warned=0
+    probe="$(mktemp "${RTOS_DIR}/.rtos-probe.XXXXXX")" || die "目标目录不可写: ${RTOS_DIR}"
+    printf 'rtos-probe\n' > "${probe}"
+    if [[ "$(cat "${probe}")" != rtos-probe ]]; then
+        rm -f -- "${probe}"
+        die "写入回读失败: ${RTOS_DIR}"
+    fi
+    rm -f -- "${probe}"
+
+    STAGED_FILE=''
+    trap '[[ -z "${STAGED_FILE}" ]] || rm -f -- "${STAGED_FILE}"' EXIT
+    local attempts="${PUT_ATTEMPTS:-3}"
+    [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || die "PUT_ATTEMPTS 必须是正整数"
+    for i in "${!NAMES[@]}"; do
+        dst="${RTOS_DIR}/${NAMES[i]}"
+        STAGED_FILE="$(mktemp "${dst}.upload.XXXXXX")"
+        ok=0
+        for ((attempt = 1; attempt <= attempts; attempt++)); do
+            if cp -- "${SOURCES[i]}" "${STAGED_FILE}" && same_file "${SOURCES[i]}" "${STAGED_FILE}"; then
+                ok=1
+                break
+            fi
+        done
+        [[ "${ok}" == 1 ]] || die "${NAMES[i]} 写入校验失败；原有文件未替换"
+        mv -f -- "${STAGED_FILE}" "${dst}"
+        STAGED_FILE=''
+        same_file "${SOURCES[i]}" "${dst}" || die "${NAMES[i]} 替换后校验失败"
+        if [[ "${NAMES[i]}" != startup_final.list ]]; then
+            if ! chmod 755 "${dst}" 2>/dev/null && [[ "${chmod_warned}" == 0 ]]; then
+                warn "该文件系统不支持 chmod；板端挂载时需提供可执行权限"
+                chmod_warned=1
+            fi
+        fi
+        info "已写入并校验 ${NAMES[i]}"
+    done
+
+    if [[ -z "${TARGET}" ]]; then
+        mkdir -p "${RTOS_DIR}/logs" "${RTOS_DIR}/records"
+        if [[ "${KEEP_LOGS}" == 0 ]]; then
+            rm -f -- "${RTOS_DIR}"/logs/*.log "${RTOS_DIR}"/logs/*.pid
+            rm -rf -- "${RTOS_DIR}"/records/*
+            info "已清理日志与录像（--keep-logs 可保留）"
+        fi
+    fi
+    sync
+}
+
+if [[ "${RTOS_MODE}" == scp ]]; then
+    deploy_network
+else
+    deploy_card
+fi
+
+info "部署完成；请重启板子以加载新文件（读卡器模式先卸载 SD 卡再插回板子）"
+info "板端手动验证（不要与 launcher 同时跑，两者都独占 VICAP）:"
+info "  msh> ${BOARD_DIR}/launcher -t"
+info "  msh> ${BOARD_DIR}/dart_vision --seconds 10"

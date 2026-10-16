@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.20)
 # 可在板端 RT-Smart 中直接运行的可执行程序（ELF）。
 #
 # 构建方式（交叉编译，目标 rv64imafdcv / lp64d，musl 静态链接）：
-#   bash scripts/build.sh
+#   bash .script/build-rtos
 # 或手动：
 #   cmake -S . -B build \
 #         -DCMAKE_TOOLCHAIN_FILE=$PWD/cmake/toolchain-riscv64-musl.cmake \

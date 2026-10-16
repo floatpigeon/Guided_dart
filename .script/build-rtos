@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# ============================================================================
+# build-rtos —— 编译板端可执行文件（交叉编译，产物 build-cross/<目标>/<目标>）
+#
+# 用法（0 或 1 个参数）:
+#   build-rtos              增量编译全部板端目标（launcher + dart_vision）
+#   build-rtos -r           清掉 build-cross 后全量重编（rebuild）
+#   build-rtos <目标名>     只编该目标：launcher | dart_vision
+#   build-rtos --host       host 编译检查（不需要工具链，不能上板）
+#   build-rtos -h           本帮助
+#
+# 自动探测工具链，必要时先 export K230_TOOLCHAIN_DIR=...
+# 环境变量: K230_TOOLCHAIN_DIR / K230_SDK_ROOT / DART_BUILD_DIR
+# ============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=.script/_rtos-common.sh
+source "${SCRIPT_DIR}/_rtos-common.sh"
+
+usage() {
+    sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+if [[ $# -gt 1 ]]; then
+    usage >&2
+    die "只接受 0 或 1 个参数（收到 $# 个）"
+fi
+
+ARG="${1:-}"
+TARGET=""
+HOST=0
+REBUILD=0
+
+case "${ARG}" in
+-h | --help)
+    usage
+    exit 0
+    ;;
+--host)
+    HOST=1
+    ;;
+-r | --rebuild)
+    REBUILD=1
+    ;;
+'')
+    ;;
+-*)
+    usage >&2
+    die "未知选项: ${ARG}"
+    ;;
+launcher | dart_vision)
+    TARGET="${ARG}"
+    ;;
+*)
+    usage >&2
+    die "未知目标: ${ARG}（可选 launcher | dart_vision）"
+    ;;
+esac
+
+cd "${REPO_ROOT}"
+if [[ "${HOST}" == "1" ]]; then
+    BUILD_DIR="${DART_BUILD_DIR:-build}"
+    info "host 编译检查（不可上板）"
+    cmake --preset host -B "${BUILD_DIR}"
+    cmake --build "${BUILD_DIR}" --parallel
+    info "host 构建完成（不可上板，仅用于编译检查）"
+    exit 0
+fi
+
+BUILD_DIR="${DART_BUILD_DIR:-build-cross}"
+SDK_ROOT="${K230_SDK_ROOT:-/mnt/mydata/kRTOSSDK}"
+TOOLCHAIN_CANDIDATES=(
+    "${REPO_ROOT}/third_party/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin"
+    "/mnt/mydata/SelfGuidingDart/third_party/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin"
+    "/opt/toolchains/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin"
+)
+if [[ -z "${K230_TOOLCHAIN_DIR:-}" ]]; then
+    for candidate in "${TOOLCHAIN_CANDIDATES[@]}"; do
+        if [[ -x "${candidate}/riscv64-unknown-linux-musl-gcc" ]]; then
+            export K230_TOOLCHAIN_DIR="${candidate}"
+            break
+        fi
+    done
+fi
+[[ -n "${K230_TOOLCHAIN_DIR:-}" ]] \
+    || die "找不到 RISC-V musl 工具链，请设置 K230_TOOLCHAIN_DIR 指向 bin 目录"
+[[ -x "${K230_TOOLCHAIN_DIR}/riscv64-unknown-linux-musl-gcc" ]] \
+    || die "${K230_TOOLCHAIN_DIR} 下没有 riscv64-unknown-linux-musl-gcc"
+[[ -d "${SDK_ROOT}" ]] || die "找不到 SDK: ${SDK_ROOT}（用 K230_SDK_ROOT 覆盖）"
+
+if [[ "${REBUILD}" == "1" ]]; then
+    info "rebuild：清掉 build-cross 后全量重编"
+    rm -rf "${REPO_ROOT}/build-cross"
+fi
+info "工具链: ${K230_TOOLCHAIN_DIR}"
+info "SDK: ${SDK_ROOT}"
+cmake --preset cross -B "${BUILD_DIR}" \
+    -DK230_TOOLCHAIN_DIR="${K230_TOOLCHAIN_DIR}" -DK230_SDK_ROOT="${SDK_ROOT}"
+BUILD_ARGS=()
+[[ -z "${TARGET}" ]] || BUILD_ARGS+=(--target "${TARGET}")
+cmake --build "${BUILD_DIR}" "${BUILD_ARGS[@]}" --parallel
+
+echo
+info "产物:"
+for artifact in "${BUILD_DIR}"/*/*; do
+    if [[ -f "${artifact}" && -x "${artifact}" ]]; then
+        printf '  %s\n' "${artifact}"
+    fi
+done
+echo
+case "${ARG}" in
+launcher | dart_vision)
+    info "下一步: deploy-rtos ${ARG}"
+    ;;
+*)
+    info "下一步: deploy-rtos"
+    ;;
+esac
