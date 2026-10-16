@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Host only. MCAP can also be opened directly in Foxglove without ROS playback. -->
+  <arg name="address" default="127.0.0.1" description="Foxglove WebSocket bind address"/>
+  <arg name="port" default="8765" description="Foxglove WebSocket port"/>
+  <arg name="play_bag" default="false" description="Start a paused ROS 2 bag player"/>
+  <arg name="bag" default="" description="Bag directory, required when play_bag is true"/>
+  <arg name="rate" default="1.0" description="Bag playback rate"/>
+
+  <include file="$(find-pkg-share foxglove_bridge)/launch/foxglove_bridge_launch.xml">
+    <arg name="address" value="$(var address)"/>
+    <arg name="port" value="$(var port)"/>
+    <arg name="use_sim_time" value="true"/>
+  </include>
+
+  <!-- Launch does not forward an interactive stdin; resume through the player service. -->
+  <executable if="$(var play_bag)" output="screen"
+              cmd="ros2 bag play $(var bag) --clock 100 --rate $(var rate) --start-paused --disable-keyboard-controls"/>
+</launch>

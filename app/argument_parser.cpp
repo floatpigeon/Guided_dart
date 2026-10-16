@@ -34,6 +34,10 @@ public:
     char rec_dir[512] = "/sdcard/app/records";
     char det_csv[512] = "";         /* 空 = 关闭 */
     char log_path[512] = "/sdcard/app/logs/dart_app.log";
+    bool imu_on = false;
+    int imu_bus = -1;
+    int imu_cs = -2; /* -2 = 未配置；-1 = HAL 默认片选。 */
+    char imu_log[512] = "/sdcard/app/logs/imu.log";
     std::uint32_t status_ms = 1000;
     std::uint32_t acquire_ms = 200;
     std::uint32_t max_acquire_errors = 8;
@@ -120,6 +124,10 @@ inline void usage(const char* argv0) {
         "  --log PATH       结构化日志（默认 %.*s）\n", static_cast<int>(kDefaultLog.size()),
         kDefaultLog.data());
     std::printf("  --status-ms N    状态行间隔（默认 1000）\n");
+    std::printf("  --imu on|off     IMU 独立采样与日志（默认 off）\n");
+    std::printf("  --imu-bus N      SPI 总线 0..2，启用 IMU 时必填\n");
+    std::printf("  --imu-cs N       片选引脚 0..63，-1 使用 HAL 默认，启用 IMU 时必填\n");
+    std::printf("  --imu-log PATH   原始/积分数据日志（默认 /sdcard/app/logs/imu.log）\n");
     std::printf("  --acquire-ms N   单次取帧超时（默认 200）\n");
     std::printf("  --max-acquire-errors N  连续取帧错误上限，超过即退出（默认 8）\n");
     std::printf("  -h, --help       显示本帮助\n");
@@ -144,6 +152,25 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
             return std::unexpected<int>(0);
         }
         std::string_view value;
+        if (a == "--imu-bus" || a == "--imu-cs") {
+            if (!need_value(value)) {
+                std::fprintf(
+                    stderr, "%s: %.*s 缺少参数\n", argv[0], static_cast<int>(a.size()), a.data());
+                return std::unexpected<int>(2);
+            }
+            const auto n = a == "--imu-cs" && value == "-1" ? -1 : parse_int(value);
+            if ((n < 0 && !(a == "--imu-cs" && value == "-1"))
+                || n > (a == "--imu-bus" ? 2 : 63)) {
+                std::fprintf(
+                    stderr, "%s: %.*s 超出范围\n", argv[0], static_cast<int>(a.size()), a.data());
+                return std::unexpected<int>(2);
+            }
+            if (a == "--imu-bus")
+                args.imu_bus = static_cast<int>(n);
+            else
+                args.imu_cs = static_cast<int>(n);
+            continue;
+        }
         if (a == "--seconds" || a == "--fps" || a == "--csi" || a == "--mirror" || a == "--exp"
             || a == "--rec-fps" || a == "--rec-keep" || a == "--threshold" || a == "--status-ms"
             || a == "--acquire-ms" || a == "--max-acquire-errors") {
@@ -214,7 +241,7 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
             }
             continue;
         }
-        if (a == "--vision" || a == "--record") {
+        if (a == "--vision" || a == "--record" || a == "--imu") {
             if (!need_value(value)) {
                 std::fprintf(
                     stderr, "%s: %.*s 缺少参数\n", argv[0], static_cast<int>(a.size()),
@@ -230,6 +257,8 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
             }
             if (a == "--vision")
                 args.vision_on = flag;
+            else if (a == "--imu")
+                args.imu_on = flag;
             else
                 args.record_on = flag;
             continue;
@@ -253,14 +282,19 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
             }
             continue;
         }
-        if (a == "--rec-dir" || a == "--det-csv" || a == "--log") {
+        if (a == "--rec-dir" || a == "--det-csv" || a == "--log" || a == "--imu-log") {
             if (!need_value(value)) {
                 std::fprintf(
                     stderr, "%s: %.*s 缺少参数\n", argv[0], static_cast<int>(a.size()),
                     a.data());
                 return std::unexpected<int>(2);
             }
-            if (a == "--rec-dir") {
+            if (a == "--imu-log") {
+                if (value.empty() || !copy_path(args.imu_log, sizeof(args.imu_log), value)) {
+                    std::fprintf(stderr, "%s: --imu-log 路径为空或过长\n", argv[0]);
+                    return std::unexpected<int>(2);
+                }
+            } else if (a == "--rec-dir") {
                 if (!copy_path(args.rec_dir, sizeof(args.rec_dir), value)) {
                     std::fprintf(stderr, "%s: --rec-dir 路径过长\n", argv[0]);
                     return std::unexpected<int>(2);
@@ -284,6 +318,10 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
         return std::unexpected<int>(2);
     }
 
+    if (args.imu_on && (args.imu_bus < 0 || args.imu_cs < -1)) {
+        std::fprintf(stderr, "%s: --imu on 需要显式指定 --imu-bus 和 --imu-cs\n", argv[0]);
+        return std::unexpected<int>(2);
+    }
     if (args.output_width == 0 || args.output_height == 0) {
         args.output_width = args.sensor_width;
         args.output_height = args.sensor_height;

@@ -22,6 +22,14 @@ file(GLOB_RECURSE _recording_classes CONFIGURE_DEPENDS "recordor/*.cpp")
 add_library(dart_recording_checks OBJECT ${_recording_classes})
 target_link_libraries(dart_recording_checks PRIVATE dart_recording)
 
+# IMU acquisition, shared estimator state and asynchronous raw/estimate log.
+add_library(dart_imu_logging INTERFACE)
+target_link_libraries(dart_imu_logging INTERFACE dart_imu Threads::Threads)
+target_include_directories(dart_imu_logging INTERFACE "${PROJECT_SOURCE_DIR}")
+file(GLOB_RECURSE _imu_runtime_classes CONFIGURE_DEPENDS "imu/*.cpp")
+add_library(dart_imu_logging_checks OBJECT ${_imu_runtime_classes})
+target_link_libraries(dart_imu_logging_checks PRIVATE dart_imu_logging)
+
 # ---------------------------------------------------------------------------
 # launcher：开机自启动器（平台无关）
 #

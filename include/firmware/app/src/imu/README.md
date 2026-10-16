@@ -26,7 +26,11 @@
 区间。阈值都在 `Estimator::Config` 里；默认 seed 门限要求重力模长误差在 2 m/s²
 以内、角速度低于 0.15 rad/s。
 
-目前只有驱动和估计器 API，没有上层消费者。IIM-42622 的偏航角靠陀螺积分，
+运行时的独立采样与原始/积分数据日志由
+[`runtime/imu/Session`](../../../../../runtime/imu/README.md) 复用上述接口实现。
+上层统一通过 Session 的 `current()` / `seed()` / `reset()` 读取和重新积分，
+与日志共用同一个估计器和 generation。`dart_app` 可通过 `--imu on` 显式启用。
+IIM-42622 的偏航角靠陀螺积分，
 没有绝对航向传感器就会漂移；速度同样会受加速度计零偏和姿态误差影响。
 
 消费者包含对应的职责文件 `.cpp`，类外方法内联；CMake 的 `dart_imu` / `dart_imu_k230`

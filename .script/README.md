@@ -116,6 +116,7 @@ clean-rtos records          # 只清录像，保留 ELF 和清单
 | `clean-rtos` | 直接用 ssh + `rm -rf`，或本地 `rm -rf`（见 `_rtos-common.sh`） |
 | `install-rtos` | 往 `~/.bashrc` / `~/.zshrc` 写一段 PATH 追加 |
 | `check-camera-pool.sh` | 用 SDK 头文件和 fake SDK 调用运行相机资源池/生命周期回归检查 |
+| `player` | 独立构建并启动 `tools/video_player` 主机录像播放器 |
 
 构建和部署使用 `DART_BUILD_DIR` 指定产物目录（默认 `build-cross`，host 默认 `build`）；
 部署同时兼容旧变量 `BUILD_DIR`，优先级低于 `DART_BUILD_DIR`。相对路径以仓库根目录为基准。
@@ -136,6 +137,18 @@ bash .script/check-camera-pool.sh
 - 只允许删绝对路径，拒绝 `/`，拒绝含 `..` 的路径；
 - 删除前逐条打印将被删的项；
 - 远程模式只使用板端 ssh 会话里必然存在的 `ls` / `rm`，不依赖 `find`、不依赖远程 glob。
+
+## 主机录像播放器
+
+```bash
+bash .script/player records/rec_0001
+bash .script/player --check records/rec_0001
+```
+
+`player` 自动增量构建 Qt 主机工具，参数透传给播放器；录像相对路径以调用时的
+工作目录为准。`DART_PLAYER_BUILD_DIR` 可覆盖默认构建目录 `build/video_player`。
+已通过 `install-rtos` 将 `.script/` 加入 PATH 时，也可直接执行 `player`。
+图片和文字关联规则及完整参数见 [播放器说明](../tools/video_player/README.md)。
 
 ## 注意
 

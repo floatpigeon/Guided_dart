@@ -15,6 +15,7 @@
 #include "directories.cpp"
 #include "logger.cpp"
 #include "monotonic_clock.cpp"
+#include "runtime/imu/session.cpp"
 #include "runtime/recordor/recorder.cpp"
 #include "src/detector/roi.cpp"
 
@@ -145,7 +146,7 @@ private:
     }
 
 public:
-    static int execute(const Arguments& args) noexcept {
+    static int execute(const Arguments& args, imu::Session* imu_session = nullptr) noexcept {
         Logger log;
         if (!log.open(args.log_path)) {
             ensure_parent(args.log_path);
@@ -431,6 +432,21 @@ public:
                     static_cast<unsigned long long>(pipeline_timing.max_us),
                     telemetry_timing.average_us(),
                     static_cast<unsigned long long>(telemetry_timing.max_us));
+                if (imu_session != nullptr) {
+                    const auto estimate = imu_session->current();
+                    const auto imu_stats = imu_session->stats();
+                    log.line(
+                        "level=INFO module=imu op=status timestamp_ns=%llu generation=%llu "
+                        "quality_events=%u accepted=%d integrated=%d reference=%d "
+                        "samples=%llu read_errors=%llu dropped=%llu io_errors=%llu\n",
+                        static_cast<unsigned long long>(estimate.sample.timestamp_ns),
+                        static_cast<unsigned long long>(estimate.generation), estimate.quality_events,
+                        estimate.sample_accepted, estimate.integrated, estimate.has_reference_frame,
+                        static_cast<unsigned long long>(imu_stats.samples),
+                        static_cast<unsigned long long>(imu_stats.read_errors),
+                        static_cast<unsigned long long>(imu_stats.dropped),
+                        static_cast<unsigned long long>(imu_stats.io_errors));
+                }
                 log.end_batch();
                 csv.flush();
                 timing_begin = telemetry_begin;

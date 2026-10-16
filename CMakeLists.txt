@@ -73,7 +73,8 @@ foreach(_lib_dir IN LISTS _hal_lib_dirs)
   target_link_directories(k230_rtos_app INTERFACE "${_lib_dir}")
 endforeach()
 if(_hal_lib_dirs)
-  target_link_libraries(k230_rtos_app INTERFACE -Wl,--start-group pwm i2c gpio fpioa spi -Wl,--end-group)
+  # fpioa (also used by SPI) calls utils_map_memory from libutils.
+  target_link_libraries(k230_rtos_app INTERFACE -Wl,--start-group pwm i2c gpio fpioa spi utils -Wl,--end-group)
 endif()
 
 # 4) 链接参数：与 SDK 一致 —— 使用 RT-Smart 链接脚本 + 静态链接

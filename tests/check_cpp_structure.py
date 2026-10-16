@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check includable C++ files without prescribing their class or function count.
+"""Repository structure regression for includable C++ files.
 
 Files group a cohesive responsibility. Related value types, private nested state
 and ordinary functions are allowed; compilation and the ODR check verify their

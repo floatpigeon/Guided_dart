@@ -34,13 +34,15 @@
 | `app/dart_entry.cpp`、`app/application.cpp` | 业务进程入口与应用编排：配置、组件组装、运行与退出 | `dart_app` → `build-cross/dart_app/dart_app` |
 | `src/detector/` | L4 灯/装甲板检测与 ROI，只消费帧数据 | `dart_detection`（INTERFACE，包含类 `.cpp`） |
 | `runtime/recordor/` | 录像线程与 PGM/PBM 文件写入 | `dart_recording`（INTERFACE，包含类 `.cpp`） |
+| `runtime/imu/` | 独立 IMU 采样、上层共用的积分状态和异步原始/积分日志 | `dart_imu_logging`（INTERFACE，包含类 `.cpp`） |
 | `include/firmware/app/src/camera/` | L3 帧数据/相机抽象 + L2/C 数据面实现 | `dart_camera_types` / `dart_camera_core` / `dart_camera_k230` / `dart_camera_acl` |
 | `include/firmware/app/src/{imu,spi}/` | IMU 抽象/估计器 + SPI 驱动 + K230 适配器 | `dart_imu` / `dart_iim42622` / `dart_imu_k230` |
 | `.script/` | 构建、部署、板端清理和相机回归检查；`install-rtos` 可注册短命令 | — |
+| [`tools/`](tools/README.md) | 主机 Qt 录像播放器、IMU 日志转 ROS 2 bag 与 Foxglove 启动工具 | 独立主机工具 |
 
 `dart_entry.cpp` 转交程序入口，`application.cpp` 组合参数解析、采集流程和退出标记；相机、
-IMU、识别、录像和控制的具体实现留在各自模块。后续 IMU 和控制任务由应用统一
-组装，按各自频率运行。`launcher` 负责进程启动与监督。应用说明见
+IMU、识别、录像和控制的具体实现留在各自模块。可选 IMU 采样已独立运行，
+后续控制任务也由应用统一组装，按各自频率运行。`launcher` 负责进程启动与监督。应用说明见
 [`app/README.md`](app/README.md)。
 
 硬件资源是独占的：**同一时刻只能有一个进程持有 VICAP/VB**，所以"识别"和"录像"
@@ -68,7 +70,7 @@ CMake 的 C++ `INTERFACE` 目标传播依赖，`*_checks` 对所有层级的可�
 cmake --preset host
 cmake --build --preset host
 ctest --test-dir build --output-on-failure
-python3 tools/check_cpp_structure.py
+python3 tests/check_cpp_structure.py
 ```
 
 ## 2. 目录结构

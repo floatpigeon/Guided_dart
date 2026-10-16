@@ -1,7 +1,7 @@
 # dart_app —— 板端业务应用
 
 `dart_entry.cpp` 提供唯一的业务进程入口，直接调用 `run_application()`。
-`application.cpp` 连接参数解析、采集流程和启动器退出标记，使用普通函数编排。
+`application.cpp` 连接参数解析、可选 IMU 服务、采集流程和启动器退出标记，使用普通函数编排。
 `argument_parser.cpp` 定义参数、默认值并用普通函数解析，`capture_pipeline.cpp` 编排采集生命周期，
 `logger.cpp` 写日志，`detection_csv.cpp` 写识别 CSV，
 退出标记由 `application.cpp` 内的函数写入。各模块包含带保护的 `.cpp`，不提供 C++ 头文件。
@@ -9,13 +9,14 @@
 `CapturePipeline` 的内部实现；日志写入和 CSV 输出各自管理缓冲与文件。
 相机启动、逐帧处理和退出顺序在采集流程中直接可见。
 当前接入相机 ACL（`dart_camera_acl`）、识别（`src/detector`）和录像
-（`runtime/recordor`）；后续 IMU、控制与执行器也由这里组装，各自实现留在对应模块。
+（`runtime/recordor`），以及可选 IMU 独立采样与日志（`runtime/imu`）；
+后续控制与执行器也由这里组装，各自实现留在对应模块。
 
 本目录是应用组合根，可以选择具体设备和运行时实现。`src/` 保持为 L4 领域，
 只消费公开数据或抽象接口；`runtime/launcher/` 负责进程启动与监督，
 `runtime/recordor/` 负责录像线程与文件写入。应用负责进程内部的组件生命周期。
 单进程可以有多个线程或任务：当前相机调用保持串行，
-后续 IMU 采样和控制任务应按各自频率运行，不能依赖相机逐帧循环的进度。
+IMU 采样独立于相机逐帧循环，控制任务也应按自身频率运行。
 
 ## 相机采集、识别与录像为什么放在同一个进程
 
@@ -71,6 +72,10 @@ dart_app [选项]
   --det-csv PATH   识别结果 CSV；off 关闭（默认关闭）
   --threshold N    二值化阈值（默认 50）
   --log PATH       结构化日志（默认 /sdcard/app/logs/dart_app.log）
+  --imu on|off     IMU 独立采样与日志（默认 off）
+  --imu-bus N      SPI 总线 0..2，启用 IMU 时必填
+  --imu-cs N       片选引脚 0..63，-1 使用 HAL 默认，启用 IMU 时必填
+  --imu-log PATH   原始/积分日志（默认 /sdcard/app/logs/imu.log）
   --status-ms N    状态行间隔（默认 1000）
   --acquire-ms N   单次取帧超时（默认 200）
   --max-acquire-errors N  连续取帧错误上限，超过即退出（默认 8）
@@ -83,6 +88,7 @@ dart_app [选项]
 
 ```
 /sdcard/app/logs/dart_app.log                      结构化日志（状态与耗时两行共用一次 fsync，写完关闭文件）
+/sdcard/app/logs/imu.log                           启用 IMU 后的原始样本、积分快照和重积分事件
 /sdcard/app/records/rec_NNNN/img/frame_XXXXXXXX.pgm   灰度取证图（或 .pbm）
 /sdcard/app/records/rec_NNNN/logs/frames.csv          每帧一行的放行记录（Recorder 写）
 /sdcard/app/records/detection.csv                     每帧一行的识别结果（本程序写）
@@ -90,6 +96,15 @@ dart_app [选项]
 
 `detection.csv` 列：`sequence,received_us,source_pts,kind,valid,cx,cy,area,radius,quality,clipped,missed_frames,candidates,full_frame,rescanned,win_x0,win_y0,win_x1,win_y1,admission`
 （窗口右下边界是**开区间坐标**，与 `ScanMetadata::search_window` 一致。）
+
+IMU 需要显式指定硬件接线，例如在确认 SPI0 和 HAL 默认片选适用后追加
+`--imu on --imu-bus 0 --imu-cs -1`；`--imu-log` 可改日志路径。默认关闭，
+启动清单不自动改动。采样为独立线程，启动时等待静止样本建立单位四元数参考系；
+后续重新积分复用同一 Session 的 `seed()` / `reset()`，`current()` 返回日志里的
+同一份 Estimate。原始计数、SI 数据、积分状态、质量位及 generation 都写入日志，
+格式与接口见 [`runtime/imu/README.md`](../runtime/imu/README.md)。
+SPI 时钟 1 MHz、超时 20 ms、1 kHz ODR/轮询、±16 g / ±2000 °/s 与零陀螺偏置
+均为 UNVALIDATED，实际采样率与写盘吞吐待板端验证。
 
 日志是"结构化单行"，正常否定结果（无目标、ROI 无连通域、候选被拒）**不进日志**，
 只进 CSV 与计数器：
@@ -111,10 +126,11 @@ step=leases_drained   排空 release 队列，租约全部在采集线程释放
 step=camera_stopped   camera.stop()
 step=summary          全部计数器 + Recorder 统计 + 工作区高水位
 step=camera_destroyed 相机析构（deinit → destroy → media destroy）
-step=exit
+step=exit            相机流程结束
+module=imu op=stop   启用时停止 IMU、排空日志队列并同步文件
 ```
 
-由 launcher 以 `&!` 拉起时，程序清理完相机后写入 launcher 提供的 `.done`
+由 launcher 以 `&!` 拉起时，程序清理完相机及可选 IMU 服务后写入 launcher 提供的 `.done`
 标记。launcher 据此启动下一轮；仅靠板端 `waitpid` 和 PID 存活探测会误判。
 
 顺序不能颠倒：`recorder` 仍持租约时 `camera.stop()` 会返回 `BUSY`。板端卡死时，

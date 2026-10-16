@@ -2,9 +2,9 @@ if(CMAKE_CROSSCOMPILING)
     return()
 endif()
 
-foreach(_test recorder_session detector_behavior camera_contract camera_adapter imu_estimator argument_parser)
+foreach(_test recorder_session detector_behavior camera_contract camera_adapter imu_estimator imu_session argument_parser)
     add_executable(${_test}_test "${_test}_test.cpp")
-    target_link_libraries(${_test}_test PRIVATE dart_detection dart_recording dart_imu)
+    target_link_libraries(${_test}_test PRIVATE dart_detection dart_recording dart_imu dart_imu_logging)
     target_compile_options(${_test}_test PRIVATE -Werror -UNDEBUG)
     add_test(NAME ${_test} COMMAND ${_test}_test)
 endforeach()
@@ -16,6 +16,6 @@ target_sources(camera_contract_test PRIVATE $<TARGET_OBJECTS:dart_odr_consumer>)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME cpp_structure
-    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_cpp_structure.py")
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_cpp_structure.py")
 add_test(NAME launcher_restart
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/launcher_restart_test.sh" $<TARGET_FILE:launcher>)
