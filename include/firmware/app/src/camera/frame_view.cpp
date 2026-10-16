@@ -1,5 +1,5 @@
-#ifndef DART_CAMERA_FRAME_VIEW_HPP
-#define DART_CAMERA_FRAME_VIEW_HPP
+#ifndef DART_INCLUDE_FIRMWARE_APP_SRC_CAMERA_FRAME_VIEW_CPP
+#define DART_INCLUDE_FIRMWARE_APP_SRC_CAMERA_FRAME_VIEW_CPP
 
 #include <chrono>
 #include <cstddef>
@@ -8,8 +8,12 @@
 
 namespace dart::camera {
 
-// Public L3 frame data. Algorithms borrow pixels without owning a device or lease.
-struct FrameView {
+enum class FrameFlag : std::uint32_t {
+    kSourcePtsUnvalidated = 1U,
+};
+
+class FrameView {
+public:
     std::span<const std::byte> luma{};
     std::uint32_t width = 0;
     std::uint32_t height = 0;
@@ -28,4 +32,4 @@ struct FrameView {
 
 } // namespace dart::camera
 
-#endif // DART_CAMERA_FRAME_VIEW_HPP
+#endif // DART_INCLUDE_FIRMWARE_APP_SRC_CAMERA_FRAME_VIEW_CPP

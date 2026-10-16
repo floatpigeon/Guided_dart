@@ -1,8 +1,14 @@
 # dart_app —— 板端业务应用
 
-`main.cpp` 提供业务进程入口，调用 `application.hpp` 声明的 `dart::app::run()`。
-`application.cpp` 是应用的**组合根**：解析配置、创建组件、连接依赖、安排运行和
-退出顺序。当前接入相机 ACL（`dart_camera_acl`）、识别（`src/detector`）和录像
+`dart_entry.cpp` 提供唯一的业务进程入口，直接调用 `run_application()`。
+`application.cpp` 连接参数解析、采集流程和启动器退出标记，使用普通函数编排。
+`argument_parser.cpp` 定义参数、默认值并用普通函数解析，`capture_pipeline.cpp` 编排采集生命周期，
+`logger.cpp` 写日志，`detection_csv.cpp` 写识别 CSV，
+退出标记由 `application.cpp` 内的函数写入。各模块包含带保护的 `.cpp`，不提供 C++ 头文件。
+采集计数器、计时汇总、停止信号、相机错误日志与退出时的租约排空属于
+`CapturePipeline` 的内部实现；日志写入和 CSV 输出各自管理缓冲与文件。
+相机启动、逐帧处理和退出顺序在采集流程中直接可见。
+当前接入相机 ACL（`dart_camera_acl`）、识别（`src/detector`）和录像
 （`runtime/recordor`）；后续 IMU、控制与执行器也由这里组装，各自实现留在对应模块。
 
 本目录是应用组合根，可以选择具体设备和运行时实现。`src/` 保持为 L4 领域，
@@ -83,7 +89,7 @@ dart_app [选项]
 ```
 
 `detection.csv` 列：`sequence,received_us,source_pts,kind,valid,cx,cy,area,radius,quality,clipped,missed_frames,candidates,full_frame,rescanned,win_x0,win_y0,win_x1,win_y1,admission`
-（窗口坐标是**闭区间四角像素坐标**，与 `ScanMetadata::search_window` 一致。）
+（窗口右下边界是**开区间坐标**，与 `ScanMetadata::search_window` 一致。）
 
 日志是"结构化单行"，正常否定结果（无目标、ROI 无连通域、候选被拒）**不进日志**，
 只进 CSV 与计数器：

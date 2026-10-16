@@ -12,7 +12,7 @@
 IIM-42622 使用 **SPI mode 3**；片选由 K230 SPI HAL 管理。
 
 C++ 侧（`IImu` 抽象、`Estimator` 估计器、`k230::Iim42622` 适配器）都在 `../imu/`，
-适配器是唯一同时包含 `imu/imu_sample.hpp` 与 `spi/iim42622.h` 的地方。
+适配器是唯一同时包含 `imu/interface.cpp` 与 `spi/iim42622.h` 的地方。
 
 ## 构建
 

@@ -6,7 +6,7 @@
 
 已落地：相机 C 数据面 + C++ ACL（`include/firmware/app/src/camera/`）、IMU/SPI
 （`.../imu/`、`.../spi/`）、识别与 ROI（`src/detector/`）、灰度取证录像
-（`runtime/recordor/`）、业务应用入口与组件编排（`app/main.cpp`、`app/application.cpp`）、开机自启动器与清单
+（`runtime/recordor/`）、业务应用入口与组件编排（`app/dart_entry.cpp`、`app/application.cpp`）、开机自启动器与清单
 （`runtime/launcher/`）、构建/部署脚本（`.script/`）。
 
 先读 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)（分层与依赖方向），
@@ -31,14 +31,14 @@
 | 目录 | 内容 | 目标 / 产物 |
 |---|---|---|
 | `runtime/launcher/` | 开机自启动器（纯 POSIX C11，平台无关）+ `startup.list` 母版 | `launcher` → `build-cross/launcher/launcher` |
-| `app/main.cpp`、`app/application.{hpp,cpp}` | 业务进程入口与应用编排：配置、组件组装、运行与退出 | `dart_app` → `build-cross/dart_app/dart_app` |
-| `src/detector/` | L4 灯/装甲板检测与 ROI，只消费帧数据 | `dart_detection`（静态库） |
-| `runtime/recordor/` | 录像线程与 PGM/PBM 文件写入 | `dart_recording`（静态库） |
+| `app/dart_entry.cpp`、`app/application.cpp` | 业务进程入口与应用编排：配置、组件组装、运行与退出 | `dart_app` → `build-cross/dart_app/dart_app` |
+| `src/detector/` | L4 灯/装甲板检测与 ROI，只消费帧数据 | `dart_detection`（INTERFACE，包含类 `.cpp`） |
+| `runtime/recordor/` | 录像线程与 PGM/PBM 文件写入 | `dart_recording`（INTERFACE，包含类 `.cpp`） |
 | `include/firmware/app/src/camera/` | L3 帧数据/相机抽象 + L2/C 数据面实现 | `dart_camera_types` / `dart_camera_core` / `dart_camera_k230` / `dart_camera_acl` |
 | `include/firmware/app/src/{imu,spi}/` | IMU 抽象/估计器 + SPI 驱动 + K230 适配器 | `dart_imu` / `dart_iim42622` / `dart_imu_k230` |
 | `.script/` | 构建、部署、板端清理和相机回归检查；`install-rtos` 可注册短命令 | — |
 
-`main.cpp` 只转交程序入口，`application.cpp` 管理进程内部的组件生命周期；相机、
+`dart_entry.cpp` 转交程序入口，`application.cpp` 组合参数解析、采集流程和退出标记；相机、
 IMU、识别、录像和控制的具体实现留在各自模块。后续 IMU 和控制任务由应用统一
 组装，按各自频率运行。`launcher` 负责进程启动与监督。应用说明见
 [`app/README.md`](app/README.md)。
@@ -46,6 +46,30 @@ IMU、识别、录像和控制的具体实现留在各自模块。后续 IMU 和
 硬件资源是独占的：**同一时刻只能有一个进程持有 VICAP/VB**，所以"识别"和"录像"
 合在 `dart_app` 一个 ELF 里，清单里也只能出现一条。详见
 [`docs/LAUNCHER_DESIGN.md`](docs/LAUNCHER_DESIGN.md) §5。
+
+C++ 文件按紧密相关的职责组织：相关值类型可以同文件，只有一个所有者的内部
+状态放进所属对象；无对象状态的简单操作可以直接写成函数。新增类或调用层应当
+隐藏实现、维护约束或管理资源，并能减少调用方需要理解的细节。
+文件以完整功能为边界，配置、结果、临时数据和辅助步骤跟随所属功能。
+例如曝光钳位和单位换算直接位于相机设置流程，估计器在同一文件定义自己的
+`Config`、`Estimate` 和 `SeedResult`；内部步骤不因有名字就独立成文件或类。
+帧数据、设备接口等确有独立消费者的契约可以单独保留。
+消费者包含带包含保护的 `.cpp`；类外方法和普通函数使用 `inline`，模板保留完整定义。
+每个可包含文件仅在 includes 后声明一次具名命名空间，不使用匿名命名空间、
+`using namespace` 或命名空间别名。进程入口 `dart_entry.cpp` 仅包含应用实现，
+由全局 `main()` 直接调用 `run_application()`。
+文件名按所在目录省略重复信息，例如 `detector/armor.cpp`。
+C 数据面继续使用 `.c` / `.h`。
+
+CMake 的 C++ `INTERFACE` 目标传播依赖，`*_checks` 对所有层级的可包含文件逐一编译，
+避免遗漏独立 include 依赖。主机回归与结构检查：
+
+```bash
+cmake --preset host
+cmake --build --preset host
+ctest --test-dir build --output-on-failure
+python3 tools/check_cpp_structure.py
+```
 
 ## 2. 目录结构
 

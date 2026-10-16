@@ -1,86 +1,60 @@
-#include "camera/camera.hpp"
-#include "camera/error.hpp"
+#ifndef DART_INCLUDE_FIRMWARE_APP_SRC_CAMERA_ERROR_CPP
+#define DART_INCLUDE_FIRMWARE_APP_SRC_CAMERA_ERROR_CPP
 
 #include <array>
 #include <charconv>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
-#include <new>
-#include <cmath>
-#include <utility>
+#include <string_view>
+#include <type_traits>
+
+#include "camera/error_codes.h"
 
 namespace dart::camera {
-namespace {
 
-constexpr std::array<std::int32_t, 26> kSiteCodes = {
-    DART_CAMERA_E_INVALID_ARGUMENT,
-    DART_CAMERA_E_INVALID_STATE,
-    DART_CAMERA_E_BUSY,
-    DART_CAMERA_E_NOT_SUPPORTED,
-    DART_CAMERA_E_OUT_OF_RANGE,
-    DART_CAMERA_E_STALE_LEASE,
-    DART_CAMERA_E_NO_MEMORY,
-    DART_CAMERA_E_NO_FRAME,
-    DART_CAMERA_E_CONFIG_VERSION,
-    DART_CAMERA_E_CONFIG_INVALID,
-    DART_CAMERA_E_SENSOR_PROBE_FAILED,
-    DART_CAMERA_E_SENSOR_MODE_MISMATCH,
-    DART_CAMERA_E_POOL_CREATE_FAILED,
-    DART_CAMERA_E_BLOCK_EXHAUSTED,
-    DART_CAMERA_E_MAP_FAILED,
-    DART_CAMERA_E_BLOCK_RELEASE_FAILED,
-    DART_CAMERA_E_FRAME_GEOMETRY_MISMATCH,
-    DART_CAMERA_E_FRAME_POOL_MISMATCH,
-    DART_CAMERA_E_FRAME_NOT_MAPPED,
-    DART_CAMERA_E_CACHE_INVALIDATE_FAILED,
-    DART_CAMERA_E_CLOCK_FAILED,
-    DART_CAMERA_E_EXPOSURE_RANGE_FAILED,
-    DART_CAMERA_E_EXPOSURE_WRITE_FAILED,
-    DART_CAMERA_E_LEASE_ABI_MISMATCH,
-    DART_CAMERA_E_LEASE_EXHAUSTED,
-    DART_CAMERA_E_SITE_CODE_MAX,
+class ErrorTextSink {
+public:
+    ErrorTextSink(char* buffer, std::size_t capacity) noexcept;
+
+    void append(std::string_view text) noexcept;
+    void append_field(std::string_view key, std::string_view value) noexcept;
+    void append_field(std::string_view key, std::uint64_t value) noexcept;
+    void append_field(std::string_view key, std::int64_t value) noexcept;
+    void append_field(std::string_view key, std::uint32_t value) noexcept;
+    void append_field(std::string_view key, std::int32_t value) noexcept;
+    void append_field(std::string_view key, bool value) noexcept;
+    void append_hex_field(std::string_view key, std::uint64_t value) noexcept;
+    void append_float_field(std::string_view key, float value) noexcept;
+
+    std::size_t size() const noexcept { return size_; }
+    bool truncated() const noexcept { return truncated_; }
+
+private:
+    void begin_field(std::string_view key) noexcept;
+    void append_unsigned(std::uint64_t value) noexcept;
+    void append_signed(std::int64_t value) noexcept;
+
+    char* buffer_;
+    std::size_t capacity_;
+    std::size_t size_;
+    bool truncated_;
+    bool has_field_;
 };
 
-consteval bool site_codes_are_unique() {
-    for (std::size_t i = 0; i < kSiteCodes.size(); ++i) {
-        for (std::size_t j = i + 1; j < kSiteCodes.size(); ++j) {
-            if (kSiteCodes[i] == kSiteCodes[j]) return false;
-        }
-    }
-    return true;
+inline ErrorTextSink::ErrorTextSink(char* buffer, std::size_t capacity) noexcept
+    : buffer_(buffer)
+    , capacity_(capacity)
+    , size_(0)
+    , truncated_(false)
+    , has_field_(false) {
+    if (buffer_ != nullptr && capacity_ != 0)
+        buffer_[0] = '\0';
 }
 
-static_assert(DART_CAMERA_E_SITE_CODE_MAX < DART_CAMERA_CODE_ERRNO_MAX,
-              "site code range must remain below errno range");
-static_assert(DART_CAMERA_CODE_VENDOR_MAX < -DART_CAMERA_CODE_ERRNO_MAX,
-              "vendor code range must remain below errno range");
-static_assert(site_codes_are_unique(), "camera site codes must be unique");
-
-template <typename Error>
-ErrorPtr make_error(std::int32_t code, const CallContext& context) noexcept {
-    return ErrorPtr(new (std::nothrow) Error(code, context));
-}
-
-/* A lease whose camera is already gone cannot be released; reporting staleness is
- * the only honest answer, and it must not touch the dead owner.
- */
-std::expected<void, ErrorPtr> stale_lease_release(std::uint64_t token) noexcept {
-    CallContext context{};
-    context.operation = Operation::kRelease;
-    context.lease_token = token;
-    context.lease_generation = token;
-    return std::unexpected<ErrorPtr>(
-        translate_camera_code(DART_CAMERA_E_STALE_LEASE, context));
-}
-
-}  // namespace
-
-ErrorTextSink::ErrorTextSink(char* buffer, std::size_t capacity) noexcept
-    : buffer_(buffer), capacity_(capacity), size_(0), truncated_(false), has_field_(false) {
-    if (buffer_ != nullptr && capacity_ != 0) buffer_[0] = '\0';
-}
-
-void ErrorTextSink::append(std::string_view text) noexcept {
-    if (text.empty()) return;
+inline void ErrorTextSink::append(std::string_view text) noexcept {
+    if (text.empty())
+        return;
     if (buffer_ == nullptr || capacity_ == 0 || size_ >= capacity_) {
         truncated_ = true;
         return;
@@ -92,169 +66,190 @@ void ErrorTextSink::append(std::string_view text) noexcept {
         size_ += count;
         buffer_[size_] = '\0';
     }
-    if (count != text.size()) truncated_ = true;
+    if (count != text.size())
+        truncated_ = true;
 }
 
-void ErrorTextSink::begin_field(std::string_view key) noexcept {
-    if (has_field_) append(" ");
+inline void ErrorTextSink::begin_field(std::string_view key) noexcept {
+    if (has_field_)
+        append(" ");
     has_field_ = true;
     append(key);
     append("=");
 }
 
-void ErrorTextSink::append_field(std::string_view key, std::string_view value) noexcept {
+inline void ErrorTextSink::append_field(std::string_view key, std::string_view value) noexcept {
     begin_field(key);
     append(value);
 }
 
-void ErrorTextSink::append_unsigned(std::uint64_t value) noexcept {
+inline void ErrorTextSink::append_unsigned(std::uint64_t value) noexcept {
     char text[24] = {};
     const auto result = std::to_chars(text, text + sizeof(text), value);
-    if (result.ec == std::errc{}) append(std::string_view(text, static_cast<std::size_t>(result.ptr - text)));
-    else append("?");
+    if (result.ec == std::errc{})
+        append(std::string_view(text, static_cast<std::size_t>(result.ptr - text)));
+    else
+        append("?");
 }
 
-void ErrorTextSink::append_signed(std::int64_t value) noexcept {
+inline void ErrorTextSink::append_signed(std::int64_t value) noexcept {
     char text[24] = {};
     const auto result = std::to_chars(text, text + sizeof(text), value);
-    if (result.ec == std::errc{}) append(std::string_view(text, static_cast<std::size_t>(result.ptr - text)));
-    else append("?");
+    if (result.ec == std::errc{})
+        append(std::string_view(text, static_cast<std::size_t>(result.ptr - text)));
+    else
+        append("?");
 }
 
-void ErrorTextSink::append_field(std::string_view key, std::uint64_t value) noexcept {
+inline void ErrorTextSink::append_field(std::string_view key, std::uint64_t value) noexcept {
     begin_field(key);
     append_unsigned(value);
 }
 
-void ErrorTextSink::append_field(std::string_view key, std::int64_t value) noexcept {
+inline void ErrorTextSink::append_field(std::string_view key, std::int64_t value) noexcept {
     begin_field(key);
     append_signed(value);
 }
 
-void ErrorTextSink::append_field(std::string_view key, std::uint32_t value) noexcept {
+inline void ErrorTextSink::append_field(std::string_view key, std::uint32_t value) noexcept {
     append_field(key, static_cast<std::uint64_t>(value));
 }
 
-void ErrorTextSink::append_field(std::string_view key, std::int32_t value) noexcept {
+inline void ErrorTextSink::append_field(std::string_view key, std::int32_t value) noexcept {
     append_field(key, static_cast<std::int64_t>(value));
 }
 
-void ErrorTextSink::append_field(std::string_view key, bool value) noexcept {
+inline void ErrorTextSink::append_field(std::string_view key, bool value) noexcept {
     begin_field(key);
     append(value ? "true" : "false");
 }
 
-void ErrorTextSink::append_hex_field(std::string_view key, std::uint64_t value) noexcept {
+inline void ErrorTextSink::append_hex_field(std::string_view key, std::uint64_t value) noexcept {
     begin_field(key);
     char text[18] = {};
     const auto result = std::to_chars(text, text + sizeof(text), value, 16);
-    if (result.ec == std::errc{}) append(std::string_view(text, static_cast<std::size_t>(result.ptr - text)));
-    else append("?");
+    if (result.ec == std::errc{})
+        append(std::string_view(text, static_cast<std::size_t>(result.ptr - text)));
+    else
+        append("?");
 }
 
-void ErrorTextSink::append_float_field(std::string_view key, float value) noexcept {
+inline void ErrorTextSink::append_float_field(std::string_view key, float value) noexcept {
     begin_field(key);
     char text[32] = {};
-    const auto result = std::to_chars(text, text + sizeof(text), value,
-                                      std::chars_format::fixed, 3);
-    if (result.ec == std::errc{}) append(std::string_view(text, static_cast<std::size_t>(result.ptr - text)));
-    else append("?");
+    const auto result =
+        std::to_chars(text, text + sizeof(text), value, std::chars_format::fixed, 3);
+    if (result.ec == std::errc{})
+        append(std::string_view(text, static_cast<std::size_t>(result.ptr - text)));
+    else
+        append("?");
 }
 
-void CameraError::append_context(ErrorTextSink& sink) const noexcept {
-    sink.append_field("code", static_cast<std::int64_t>(code_));
-    sink.append_field("op", operation_name(context_.operation));
-    if (context_.native_hint != 0) {
-        sink.append_field("native_hint", static_cast<std::int64_t>(context_.native_hint));
-    }
-    if (context_.requested != 0) sink.append_field("requested", context_.requested);
-    if (context_.observed != 0) sink.append_field("observed", context_.observed);
-    if (context_.state != 0 || context_.required_state != 0) {
-        sink.append_field("state", context_.state);
-        sink.append_field("required_state", context_.required_state);
-    }
-    if (context_.lease_token != 0) sink.append_field("lease_token", context_.lease_token);
-    if (context_.lease_generation != 0) sink.append_field("lease_generation", context_.lease_generation);
-    if (context_.lease_owner != 0) sink.append_hex_field("lease_owner", context_.lease_owner);
-    if (context_.rollback_failed) sink.append_field("rollback_failed", true);
-    if (context_.previous_release_code != 0) sink.append_field("previous_release_code", static_cast<std::int64_t>(context_.previous_release_code));
-}
+enum class Operation {
+    kUnknown,
+    kConfigValidate,
+    kMediaCreate,
+    kMediaDestroy,
+    kCreate,
+    kInitialize,
+    kStart,
+    kAcquire,
+    kRelease,
+    kStop,
+    kDeinitialize,
+    kDestroy,
+    kGetState,
+    kGetCaps,
+    kExposureRange,
+    kSetExposure,
+};
 
-std::uint32_t HardwareError::vendor_module() const noexcept {
-    return (static_cast<std::uint32_t>(code_) >> 16U) & 0xffU;
-}
+class CallContext {
+public:
+    struct FrameGeometry {
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        std::uint32_t stride = 0;
+        std::uint32_t format = 0;
+        std::uint32_t pool_id = 0;
+        std::uint64_t physical_address = 0;
+        std::uint64_t length = 0;
+        std::uint64_t block_bytes = 0;
+    };
 
-std::uint32_t HardwareError::vendor_level() const noexcept {
-    return (static_cast<std::uint32_t>(code_) >> 13U) & 0x7U;
-}
+    struct SensorMode {
+        std::uint32_t csi_port = 0;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        std::uint32_t fps = 0;
+        std::uint32_t hdr_mode = 0;
+    };
 
-std::uint32_t HardwareError::vendor_error_id() const noexcept {
-    return static_cast<std::uint32_t>(code_) & 0x1fffU;
-}
+    Operation operation = Operation::kUnknown;
+    std::int32_t native_hint = 0;
+    std::uint32_t requested = 0;
+    std::uint32_t observed = 0;
+    std::uint32_t state = 0;
+    std::uint32_t required_state = 0;
+    bool rollback_failed = false;
+    bool has_sensor_mode = false;
+    SensorMode requested_sensor{};
+    SensorMode observed_sensor{};
+    bool has_frame_geometry = false;
+    FrameGeometry frame_geometry{};
+    std::uint64_t physical_address = 0;
+    std::uintptr_t mapped_address = 0;
+    std::uint64_t length = 0;
+    std::uint64_t block_bytes = 0;
+    bool has_exposure = false;
+    float requested_us = 0.0F;
+    float min_us = 0.0F;
+    float max_us = 0.0F;
+    float applied_us = 0.0F;
+    std::int32_t previous_release_code = 0;
+    std::uint64_t lease_token = 0;
+    std::uint64_t lease_generation = 0;
+    std::uintptr_t lease_owner = 0;
+};
 
-void HardwareError::append_context(ErrorTextSink& sink) const noexcept {
-    CameraError::append_context(sink);
-    if (code_ <= DART_CAMERA_CODE_VENDOR_MAX) {
-        sink.append_field("module", vendor_module());
-        sink.append_field("level", vendor_level());
-        sink.append_field("errid", vendor_error_id());
-    }
-}
+enum class ErrorKind {
+    kArgument,
+    kState,
+    kBusy,
+    kUnsupported,
+    kOutOfRange,
+    kNoMemory,
+    kStaleLease,
+    kHardware,
+    kCacheSync,
+    kRelease,
+    kPlatform,
+    kExposure,
+};
 
-void SensorModeMismatchError::append_context(ErrorTextSink& sink) const noexcept {
-    CameraError::append_context(sink);
-    if (!context_.has_sensor_mode) return;
-    const auto& requested = context_.requested_sensor;
-    const auto& observed = context_.observed_sensor;
-    sink.append_field("req_csi", requested.csi_port);
-    sink.append_field("req_w", requested.width);
-    sink.append_field("req_h", requested.height);
-    sink.append_field("req_fps", requested.fps);
-    sink.append_field("obs_csi", observed.csi_port);
-    sink.append_field("obs_w", observed.width);
-    sink.append_field("obs_h", observed.height);
-    sink.append_field("obs_fps", observed.fps);
-}
+class CameraError final {
+public:
+    CameraError(std::int32_t code, const CallContext& context) noexcept
+        : CameraError(classify(code), code, context) {}
 
-void FrameGeometryError::append_context(ErrorTextSink& sink) const noexcept {
-    CameraError::append_context(sink);
-    if (context_.has_frame_geometry) {
-        const auto& frame = context_.frame_geometry;
-        sink.append_field("width", frame.width);
-        sink.append_field("height", frame.height);
-        sink.append_field("stride", frame.stride);
-        sink.append_field("format", frame.format);
-        sink.append_field("pool_id", frame.pool_id);
-        sink.append_hex_field("phys", frame.physical_address);
-        sink.append_field("length", frame.length);
-        sink.append_field("block_bytes", frame.block_bytes);
-    }
-}
+    // A native code can have a more specific meaning at its source: an invalid
+    // sensor exposure range uses OUT_OF_RANGE but belongs to the exposure domain.
+    CameraError(ErrorKind kind, std::int32_t code, const CallContext& context) noexcept
+        : kind_(kind)
+        , code_(code)
+        , context_(context) {}
 
-void CacheSyncError::append_context(ErrorTextSink& sink) const noexcept {
-    CameraError::append_context(sink);
-    sink.append_hex_field("phys", context_.physical_address);
-    sink.append_hex_field("mapped", static_cast<std::uint64_t>(context_.mapped_address));
-    sink.append_field("length", context_.length);
-}
+    ErrorKind kind() const noexcept { return kind_; }
+    std::string_view category() const noexcept { return description().category; }
+    std::string_view message() const noexcept { return description().message; }
+    std::int32_t code() const noexcept { return code_; }
+    Operation operation() const noexcept { return context_.operation; }
+    const CallContext& context() const noexcept { return context_; }
+    void append_context(ErrorTextSink& sink) const noexcept;
 
-void PlatformError::append_context(ErrorTextSink& sink) const noexcept {
-    CameraError::append_context(sink);
-    if (code_ < 0) sink.append_field("errno", static_cast<std::int64_t>(-code_));
-}
-
-void ExposureRangeError::append_context(ErrorTextSink& sink) const noexcept {
-    CameraError::append_context(sink);
-    if (context_.has_exposure) {
-        sink.append_float_field("requested_us", context_.requested_us);
-        sink.append_float_field("min_us", context_.min_us);
-        sink.append_float_field("max_us", context_.max_us);
-        sink.append_float_field("applied_us", context_.applied_us);
-    }
-}
-
-std::string_view operation_name(Operation operation) noexcept {
-    switch (operation) {
+private:
+    static std::string_view operation_name(Operation operation) noexcept {
+        switch (operation) {
         case Operation::kConfigValidate: return "config_validate";
         case Operation::kMediaCreate: return "media_create";
         case Operation::kMediaDestroy: return "media_destroy";
@@ -271,143 +266,209 @@ std::string_view operation_name(Operation operation) noexcept {
         case Operation::kExposureRange: return "exposure_range";
         case Operation::kSetExposure: return "set_exposure";
         case Operation::kUnknown: break;
+        }
+        return "unknown";
     }
-    return "unknown";
-}
 
-ErrorPtr translate_camera_code(std::int32_t code, const CallContext& context) noexcept {
-    if (code == DART_CAMERA_OK || code == DART_CAMERA_E_NO_FRAME) return nullptr;
+    struct Description {
+        std::string_view category;
+        std::string_view message;
+    };
 
-    if (code < 0 && code >= -DART_CAMERA_CODE_ERRNO_MAX) {
-        return make_error<PlatformError>(code, context);
-    }
-    if (code <= DART_CAMERA_CODE_VENDOR_MAX) {
-        return make_error<HardwareError>(code, context);
-    }
+    static ErrorKind classify(std::int32_t code) noexcept;
+    Description description() const noexcept;
+
+    ErrorKind kind_;
+    std::int32_t code_;
+    CallContext context_;
+};
+
+inline ErrorKind CameraError::classify(std::int32_t code) noexcept {
+    if (code < 0 && code >= -DART_CAMERA_CODE_ERRNO_MAX)
+        return ErrorKind::kPlatform;
+    if (code <= DART_CAMERA_CODE_VENDOR_MAX)
+        return ErrorKind::kHardware;
 
     switch (code) {
-        case DART_CAMERA_E_INVALID_ARGUMENT:
-        case DART_CAMERA_E_CONFIG_VERSION:
-        case DART_CAMERA_E_CONFIG_INVALID:
-        case DART_CAMERA_E_LEASE_ABI_MISMATCH:
-            return make_error<ArgumentError>(code, context);
-        case DART_CAMERA_E_INVALID_STATE:
-            return make_error<StateError>(code, context);
-        case DART_CAMERA_E_BUSY:
-        case DART_CAMERA_E_LEASE_EXHAUSTED:
-            return make_error<BusyError>(code, context);
-        case DART_CAMERA_E_NOT_SUPPORTED:
-            return make_error<UnsupportedError>(code, context);
-        case DART_CAMERA_E_OUT_OF_RANGE:
-            return make_error<OutOfRangeError>(code, context);
-        case DART_CAMERA_E_NO_MEMORY:
-            return make_error<NoMemoryError>(code, context);
-        case DART_CAMERA_E_STALE_LEASE:
-            return make_error<StaleLeaseError>(code, context);
+    case DART_CAMERA_E_INVALID_ARGUMENT:
+    case DART_CAMERA_E_CONFIG_VERSION:
+    case DART_CAMERA_E_CONFIG_INVALID:
+    case DART_CAMERA_E_LEASE_ABI_MISMATCH: return ErrorKind::kArgument;
+    case DART_CAMERA_E_INVALID_STATE: return ErrorKind::kState;
+    case DART_CAMERA_E_BUSY:
+    case DART_CAMERA_E_LEASE_EXHAUSTED: return ErrorKind::kBusy;
+    case DART_CAMERA_E_NOT_SUPPORTED: return ErrorKind::kUnsupported;
+    case DART_CAMERA_E_OUT_OF_RANGE: return ErrorKind::kOutOfRange;
+    case DART_CAMERA_E_NO_MEMORY: return ErrorKind::kNoMemory;
+    case DART_CAMERA_E_STALE_LEASE: return ErrorKind::kStaleLease;
+    case DART_CAMERA_E_CACHE_INVALIDATE_FAILED: return ErrorKind::kCacheSync;
+    case DART_CAMERA_E_BLOCK_RELEASE_FAILED: return ErrorKind::kRelease;
+    case DART_CAMERA_E_CLOCK_FAILED: return ErrorKind::kPlatform;
+    case DART_CAMERA_E_EXPOSURE_RANGE_FAILED:
+    case DART_CAMERA_E_EXPOSURE_WRITE_FAILED: return ErrorKind::kExposure;
+    default: return ErrorKind::kHardware;
+    }
+}
+
+inline CameraError::Description CameraError::description() const noexcept {
+    switch (kind_) {
+    case ErrorKind::kArgument:
+        return {"camera.argument", "invalid camera argument or configuration"};
+    case ErrorKind::kState:
+        return {"camera.state", "camera operation is invalid in the current state"};
+    case ErrorKind::kBusy:
+        return {"camera.busy", "camera resource is still owned"};
+    case ErrorKind::kUnsupported:
+        return {"camera.unsupported", "camera operation is not supported"};
+    case ErrorKind::kOutOfRange:
+        return {"camera.range", "camera value is outside the supported range"};
+    case ErrorKind::kNoMemory:
+        return {"camera.memory", "camera allocation failed"};
+    case ErrorKind::kStaleLease:
+        return {"camera.lease", "frame lease is stale or belongs to another camera"};
+    case ErrorKind::kCacheSync:
+        return {"camera.cache", "frame cache invalidation failed"};
+    case ErrorKind::kRelease:
+        return {"camera.release", "camera resource release failed"};
+    case ErrorKind::kPlatform:
+        return {"camera.platform", "platform operation failed"};
+    case ErrorKind::kExposure:
+        return {"camera.exposure", "exposure operation failed"};
+    case ErrorKind::kHardware:
+        switch (code_) {
         case DART_CAMERA_E_SENSOR_MODE_MISMATCH:
-            return make_error<SensorModeMismatchError>(code, context);
+            return {"camera.sensor_mode", "sensor did not provide the exact requested mode"};
         case DART_CAMERA_E_FRAME_GEOMETRY_MISMATCH:
         case DART_CAMERA_E_FRAME_POOL_MISMATCH:
         case DART_CAMERA_E_FRAME_NOT_MAPPED:
-            return make_error<FrameGeometryError>(code, context);
-        case DART_CAMERA_E_CACHE_INVALIDATE_FAILED:
-            return make_error<CacheSyncError>(code, context);
-        case DART_CAMERA_E_BLOCK_RELEASE_FAILED:
-            return make_error<ReleaseError>(code, context);
-        case DART_CAMERA_E_EXPOSURE_RANGE_FAILED:
-        case DART_CAMERA_E_EXPOSURE_WRITE_FAILED:
-            return make_error<ExposureRangeError>(code, context);
-        case DART_CAMERA_E_CLOCK_FAILED:
-            return make_error<PlatformError>(code, context);
-        case DART_CAMERA_E_SENSOR_PROBE_FAILED:
-        case DART_CAMERA_E_POOL_CREATE_FAILED:
-        case DART_CAMERA_E_BLOCK_EXHAUSTED:
-        case DART_CAMERA_E_MAP_FAILED:
+            return {"camera.frame_geometry", "frame geometry or pool ownership did not match"};
+        default: return {"camera.hardware", "camera hardware operation failed"};
+        }
+    }
+    return {"camera.hardware", "camera hardware operation failed"};
+}
+
+inline void CameraError::append_context(ErrorTextSink& sink) const noexcept {
+    sink.append_field("code", static_cast<std::int64_t>(code_));
+    sink.append_field("op", operation_name(context_.operation));
+    if (context_.native_hint != 0) {
+        sink.append_field("native_hint", static_cast<std::int64_t>(context_.native_hint));
+    }
+    if (context_.requested != 0)
+        sink.append_field("requested", context_.requested);
+    if (context_.observed != 0)
+        sink.append_field("observed", context_.observed);
+    if (context_.state != 0 || context_.required_state != 0) {
+        sink.append_field("state", context_.state);
+        sink.append_field("required_state", context_.required_state);
+    }
+    if (context_.lease_token != 0)
+        sink.append_field("lease_token", context_.lease_token);
+    if (context_.lease_generation != 0)
+        sink.append_field("lease_generation", context_.lease_generation);
+    if (context_.lease_owner != 0)
+        sink.append_hex_field("lease_owner", context_.lease_owner);
+    if (context_.rollback_failed)
+        sink.append_field("rollback_failed", true);
+    if (context_.previous_release_code != 0)
+        sink.append_field(
+            "previous_release_code", static_cast<std::int64_t>(context_.previous_release_code));
+
+    switch (kind_) {
+    case ErrorKind::kPlatform:
+        if (code_ < 0)
+            sink.append_field("errno", -static_cast<std::int64_t>(code_));
+        break;
+    case ErrorKind::kExposure:
+        if (context_.has_exposure) {
+            sink.append_float_field("requested_us", context_.requested_us);
+            sink.append_float_field("min_us", context_.min_us);
+            sink.append_float_field("max_us", context_.max_us);
+            sink.append_float_field("applied_us", context_.applied_us);
+        }
+        break;
+    case ErrorKind::kCacheSync:
+        sink.append_hex_field("phys", context_.physical_address);
+        sink.append_hex_field("mapped", static_cast<std::uint64_t>(context_.mapped_address));
+        sink.append_field("length", context_.length);
+        break;
+    case ErrorKind::kHardware:
+        switch (code_) {
+        case DART_CAMERA_E_SENSOR_MODE_MISMATCH:
+            if (context_.has_sensor_mode) {
+                const auto& requested = context_.requested_sensor;
+                const auto& observed = context_.observed_sensor;
+                sink.append_field("req_csi", requested.csi_port);
+                sink.append_field("req_w", requested.width);
+                sink.append_field("req_h", requested.height);
+                sink.append_field("req_fps", requested.fps);
+                sink.append_field("obs_csi", observed.csi_port);
+                sink.append_field("obs_w", observed.width);
+                sink.append_field("obs_h", observed.height);
+                sink.append_field("obs_fps", observed.fps);
+            }
+            break;
+        case DART_CAMERA_E_FRAME_GEOMETRY_MISMATCH:
+        case DART_CAMERA_E_FRAME_POOL_MISMATCH:
+        case DART_CAMERA_E_FRAME_NOT_MAPPED:
+            if (context_.has_frame_geometry) {
+                const auto& frame = context_.frame_geometry;
+                sink.append_field("width", frame.width);
+                sink.append_field("height", frame.height);
+                sink.append_field("stride", frame.stride);
+                sink.append_field("format", frame.format);
+                sink.append_field("pool_id", frame.pool_id);
+                sink.append_hex_field("phys", frame.physical_address);
+                sink.append_field("length", frame.length);
+                sink.append_field("block_bytes", frame.block_bytes);
+            }
+            break;
         default:
-            return make_error<HardwareError>(code, context);
+            if (code_ <= DART_CAMERA_CODE_VENDOR_MAX) {
+                const auto bits = static_cast<std::uint32_t>(code_);
+                sink.append_field("module", (bits >> 16U) & 0xffU);
+                sink.append_field("level", (bits >> 13U) & 0x7U);
+                sink.append_field("errid", bits & 0x1fffU);
+            }
+            break;
+        }
+        break;
+    default: break;
     }
 }
 
-FrameLease::FrameLease(FrameLease&& other) noexcept : slot_(other.slot_) {
-    other.slot_ = nullptr;
-}
-
-FrameLease& FrameLease::operator=(FrameLease&& other) noexcept {
-    if (this == &other) return *this;
-    if (slot_ != nullptr && slot_->state == detail::FrameLeaseSlotState::kHeld) {
-        auto result = release();
-        if (!result && slot_ != nullptr) slot_->pending_error = std::move(result.error());
+static_assert(std::is_trivially_copyable_v<CameraError>);
+static_assert(std::is_standard_layout_v<CameraError>);
+static_assert(
+    DART_CAMERA_E_SITE_CODE_MAX < DART_CAMERA_CODE_ERRNO_MAX,
+    "site code range must remain below errno range");
+static_assert(
+    DART_CAMERA_CODE_VENDOR_MAX < -DART_CAMERA_CODE_ERRNO_MAX,
+    "vendor code range must remain below errno range");
+static_assert([] {
+    constexpr std::array<std::int32_t, 26> codes = {
+        DART_CAMERA_E_INVALID_ARGUMENT, DART_CAMERA_E_INVALID_STATE,
+        DART_CAMERA_E_BUSY, DART_CAMERA_E_NOT_SUPPORTED, DART_CAMERA_E_OUT_OF_RANGE,
+        DART_CAMERA_E_STALE_LEASE, DART_CAMERA_E_NO_MEMORY, DART_CAMERA_E_NO_FRAME,
+        DART_CAMERA_E_CONFIG_VERSION, DART_CAMERA_E_CONFIG_INVALID,
+        DART_CAMERA_E_SENSOR_PROBE_FAILED, DART_CAMERA_E_SENSOR_MODE_MISMATCH,
+        DART_CAMERA_E_POOL_CREATE_FAILED, DART_CAMERA_E_BLOCK_EXHAUSTED,
+        DART_CAMERA_E_MAP_FAILED, DART_CAMERA_E_BLOCK_RELEASE_FAILED,
+        DART_CAMERA_E_FRAME_GEOMETRY_MISMATCH, DART_CAMERA_E_FRAME_POOL_MISMATCH,
+        DART_CAMERA_E_FRAME_NOT_MAPPED, DART_CAMERA_E_CACHE_INVALIDATE_FAILED,
+        DART_CAMERA_E_CLOCK_FAILED, DART_CAMERA_E_EXPOSURE_RANGE_FAILED,
+        DART_CAMERA_E_EXPOSURE_WRITE_FAILED, DART_CAMERA_E_LEASE_ABI_MISMATCH,
+        DART_CAMERA_E_LEASE_EXHAUSTED, DART_CAMERA_E_SITE_CODE_MAX,
+    };
+    for (std::size_t i = 0; i < codes.size(); ++i) {
+        for (std::size_t j = i + 1; j < codes.size(); ++j) {
+            if (codes[i] == codes[j])
+                return false;
+        }
     }
-    slot_ = other.slot_;
-    other.slot_ = nullptr;
-    return *this;
-}
+    return true;
+}(), "camera site codes must be unique");
 
-FrameLease::~FrameLease() {
-    if (slot_ == nullptr || slot_->state != detail::FrameLeaseSlotState::kHeld) return;
-    auto result = release();
-    if (!result && slot_ != nullptr && slot_->state == detail::FrameLeaseSlotState::kHeld) {
-        /* A destructor cannot report a failure, so the owning camera keeps it and
-         * surfaces it on its next protected call instead of losing it. */
-        slot_->pending_error = std::move(result.error());
-    }
-}
+} // namespace dart::camera
 
-const FrameView& FrameLease::view() const noexcept {
-    static const FrameView empty{};
-    if (slot_ == nullptr || slot_->state != detail::FrameLeaseSlotState::kHeld) return empty;
-    return slot_->view;
-}
-
-bool FrameLease::valid() const noexcept {
-    return slot_ != nullptr && slot_->state == detail::FrameLeaseSlotState::kHeld;
-}
-
-std::expected<void, ErrorPtr> FrameLease::release() noexcept {
-    if (slot_ == nullptr) return {};
-    detail::FrameLeaseSlot* slot = slot_;
-    if (slot->state == detail::FrameLeaseSlotState::kFree) {
-        slot_ = nullptr;
-        return {};
-    }
-    if (slot->state == detail::FrameLeaseSlotState::kDetached || slot->release == nullptr) {
-        slot_ = nullptr;
-        return stale_lease_release(slot->token);
-    }
-    auto result = slot->release(slot);
-    if (result) slot_ = nullptr;
-    return result;
-}
-
-std::expected<ExposurePlan, ErrorPtr> plan_fixed_exposure_us(
-    std::uint32_t requested_us, float min_us, float max_us,
-    Operation operation) noexcept {
-    CallContext context{};
-    context.operation = operation;
-    context.has_exposure = true;
-    context.requested_us = static_cast<float>(requested_us);
-    context.min_us = min_us;
-    context.max_us = max_us;
-    const float lower = std::ceil(min_us);
-    const float upper = std::floor(max_us);
-    if (!std::isfinite(min_us) || !std::isfinite(max_us) || !std::isfinite(lower) ||
-        !std::isfinite(upper) || min_us < 0.0F || max_us < min_us ||
-        upper < lower || upper > 4294967295.0F) {
-        return std::unexpected<ErrorPtr>(
-            ErrorPtr(new (std::nothrow) ExposureRangeError(
-                DART_CAMERA_E_OUT_OF_RANGE, context)));
-    }
-    const auto first = static_cast<std::uint32_t>(lower);
-    const auto last = static_cast<std::uint32_t>(upper);
-    const auto applied = requested_us < first ? first : (requested_us > last ? last : requested_us);
-    context.applied_us = static_cast<float>(applied);
-    ExposurePlan plan{};
-    plan.requested_us = requested_us;
-    plan.applied_us = applied;
-    plan.min_us = min_us;
-    plan.max_us = max_us;
-    plan.seconds = static_cast<float>(applied) / 1000000.0F;
-    return plan;
-}
-
-}  // namespace dart::camera
+#endif // DART_INCLUDE_FIRMWARE_APP_SRC_CAMERA_ERROR_CPP

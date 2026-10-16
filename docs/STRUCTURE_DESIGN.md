@@ -1,6 +1,6 @@
 # v2 架构基线（所有后续 agent 先读）
 
-本仓库是 K230D/K230 RT-Smart 的**用户态业务代码仓库**，不是固件工程，也不负责烧录或修改板端 BSP。当前分支只有构建骨架、配置和设计文档；`src/`、`include/` 下的业务模块需要后续任务逐步建立。文档中出现的源码路径均为目标路径，不表示该文件当前已经存在。
+本仓库是 K230D/K230 RT-Smart 的**用户态业务代码仓库**，不负责烧录或修改板端 BSP。当前已实现相机、IMU、检测、录像、应用编排和启动器；控制等后续模块仍以设计目标描述。实际入口和文件以各模块 README 与源码为准。
 
 ## 1. 工况与目标
 
@@ -51,16 +51,28 @@ L1  BSP/HAL/MPP（厂商 C）
 
 ## 3. 目录职责
 
+封装以减少理解成本为准。配置、结果、内部状态和辅助步骤应跟随所属职责；
+只有独立消费者、资源生命周期或跨模块契约支持时，才建立新的文件或调用层。
+一次操作中的临时计算直接留在操作内，例如曝光范围检查、钳位和单位换算属于
+相机的曝光设置方法，不需要额外的规划器和规划结果。无状态操作使用普通函数，
+对象通过私有状态和方法维护实际不变量。
+
+参考 [RMCS 的 TD](https://github.com/Alliance-Algorithm/RMCS/blob/a27e3d14c36ef8d780287e154b32ed4a70bbbdc9/rmcs_ws/src/rmcs_core/src/controller/adrc/td.hpp)
+把 Config、State、Output 与计算放在一起，以及
+[librmcs 的设备扫描器](https://github.com/Alliance-Algorithm/librmcs/blob/47313cea064750c8fc42c822083ebe9df7179dbd/host/src/transport/usb/device_scanner.hpp)
+将扫描结果和诊断类型收在实现内部的组织方式。这里借鉴职责边界，不引入其框架依赖。
+
 实际布局（2026-10 更新）：`src/` 严格保持为 L4；应用组装与具体运行时实现
 放在独立目录，各目录的 `CMakeLists.txt` 分别声明本目录目标。
 
 ```
 src/                        L4 领域与策略，只依赖 L3 公开数据或抽象接口
-  detector/                 检测 + ROI（dart_detection，STATIC；detector.cpp + roi.cpp）
+  detector/                 连通域、灯、装甲板与 ROI（dart_detection，INTERFACE + 逐文件检查）
   control/                  目标：C++ 观测器、状态机、外环/内环和分配
 app/                        应用组合根，可以选择具体设备和运行时实现
-  main.cpp                  业务进程入口（dart_app）
-  application.hpp/.cpp       应用编排：配置、组件组装、运行调度和退出
+  dart_entry.cpp            业务进程入口（dart_app）
+  application.cpp           参数解析、采集流程与启动器退出标记
+  capture_pipeline.cpp      组件生命周期、逐帧处理与退出
   README.md                 应用参数、运行流水线和退出契约
 runtime/                    具体运行时服务与进程管理，L4 不依赖本目录
   recordor/                 录像线程、PGM/PBM/CSV 文件写入（dart_recording）
@@ -72,7 +84,7 @@ docs/                       设计、标定、调试和验收契约
 ```
 
 `src/` 不包含 K230 工厂、POSIX 线程/文件操作、main 或进程管理。检测器只包含
-`camera/frame_view.hpp`，通过头文件目标 `dart_camera_types` 获取帧数据类型，
+`camera/frame_view.cpp`，通过 INTERFACE 目标 `dart_camera_types` 获取帧数据类型，
 不链接 `dart_camera_acl` 或 K230 后端。设备实现由 `app/` 明确选择。
 
 应用组合根负责相机、IMU、识别、录像、控制等组件的组装和生命周期，具体实现仍在

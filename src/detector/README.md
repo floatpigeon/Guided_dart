@@ -1,24 +1,27 @@
 # 检测与 ROI
 
-纯 C++23 模块，CMake 目标为 `dart_detection`（**STATIC**，编译
-`detector.cpp` 与 `roi.cpp`）。输入为 L3 公开的只读 `dart::camera::FrameView`；
-检测同步借用像素，不取帧、不释放租约、不保留帧指针。
+纯 C++23 的 L4 算法。`.cpp` 按职责组织并带包含保护；相关值类型可以同文件，
+跟踪历史等仅在对象内部使用的状态定义为私有类型。消费者包含所需文件，并链接
+`dart_detection` INTERFACE 目标以取得编译要求。`dart_detection_checks` 在主机和
+交叉构建中逐文件编译，校验独立依赖。
 
-本模块属于 L4，只包含 `camera/frame_view.hpp`，构建时依赖头文件目标
-`dart_camera_types`；不链接相机 ACL、K230 后端、录像服务或应用入口。
+| 文件 | 类 / 职责 |
+|---|---|
+| `blob_workspace.cpp` | 连通域提取、候选数据、`BlobWorkspace::Config` 及私有游程/组件存储 |
+| `light.cpp` | 灯候选选择、跨帧确认、配置与确认状态 |
+| `armor.cpp` | 灯条配对、板心几何与 `ArmorDetector::Config`；灯条和辅助计算为私有实现 |
+| `roi.cpp` | `RoiDetector::Config`、测量编排、窗口策略及跟踪历史 |
+| `interface.cpp` | `IDetector`，检测与重置接口 |
+| `geometry.cpp`、`numeric.cpp` | 检测功能间共享的几何与数值运算，使用普通函数 |
+| `result.cpp` | 目标、帧身份、扫描元数据和检测结果组成的公开契约 |
 
-`detector.cpp`（`BlobWorkspace` / `LightDetector` / `ArmorDetector`）与 `roi.cpp`
-（`internal::LightTracker` / `internal::RoiPolicy` / `RoiDetector`）是**两个独立翻译
-单元**，各自 `#include "detector.hpp"`、方法在类外定义，文件内没有重复包含保护。
-因此消费者**只包含 `detector.hpp` 并链接 `dart_detection`**，不要 `#include` 任何
-`.cpp`（早前 README 里"包含 roi.cpp 即可"的写法已作废：那样两个文件既不编译也不被
-类型检查）。已完成的应用示例见 `app/application.cpp`。
+只依赖 `camera/frame_view.cpp` 的只读帧数据；不持有相机、不释放租约、不保留像素指针。
 
 初始化时构造 `dart::detection::RoiDetector` 并调用
 `Prepare(max_width, max_height)`。在现有采集线程拿到 `AcquireStatus::kFrame` 后调用：
 
 ```cpp
-#include "src/detector/detector.hpp"   // 链接 dart_detection
+#include "src/detector/roi.cpp"   // target_link_libraries(... dart_detection)
 
 auto result = detector.Detect(acquired.lease.view());
 if (result && result->target.valid) {
@@ -34,7 +37,7 @@ if (result && result->target.valid) {
 返回 `DetectionError`。启动分配失败由调用方处理，热路径没有动态分配。一个实例用于
 一条按序调用的流水线；相机停止重启后调用 `Reset()`，再接受新的帧号。
 
-`detector.cpp` 实现 `light_detect`、`armor_detect` 和共用的游程测量：
+`blob_workspace.cpp`、`light.cpp` 与 `armor.cpp` 分别实现游程测量、灯检测和装甲板检测：
 
 - 直接在 ROI 的 Y8 上用可配置阈值提取 8 邻域连通域，按游程计算面积、质心、
   二阶矩、圆度和主轴；常规 step=1 扫描中两个检测类读同一组候选。首次全图获取时灯用 search_step 采样，装甲只在灯锚定的小窗 step=1 精扫。
@@ -62,14 +65,13 @@ if (result && result->target.valid) {
 工作区最大宽高为 65535，默认最多 16384 个游程和 256 个有效连通域；超过上限明确
 返回 `kWorkspaceExhausted`，不静默截断。较小帧可以使用原有工作区，超过准备尺寸则拒收。
 默认工作区约 1.3 MiB；每帧只清理实际使用的组件槽，不申请整图二值副本。
-两个单独检测类消费 `BlobWorkspace::scan()` 产生的候选，输入须遵守其几何和数值约定。
+两个单独检测类消费 `BlobWorkspace::Scan()` 产生的候选，输入须遵守其几何和数值约定。
 
 算法来源：[Guided_dart / k230_v1](https://github.com/hyperle/Guided_dart/tree/k230_v1)，
 参考版本 `a7390262203f2565876aef1d2a8b628b2722d79f`，
 主要参考 `src/detection/measure/roi_measure.cpp`、
 `src/detection/armor/armor_{rules,geometry,windows}.cpp` 和
-`include/detection/math/shape_metrics.hpp`。
+`include/detection/math/shape_metrics（上游历史路径）`。
 
-`dart_detection` 已在 host 与 K230 交叉构建下作为静态库编译通过（2026-10-13：
-`bash .script/build-rtos --host` 与 `bash .script/build-rtos dart_app`）。
-实际识别质量、耗时和 DMA/流水线行为仍待板端验证。
+代码通过主机逐文件编译、行为回归和 K230 交叉链接验证；
+实际识别质量、耗时和 DMA/流水线行为仍需板端验证。

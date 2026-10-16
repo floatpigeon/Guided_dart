@@ -1,27 +1,39 @@
 # Camera ACL
 
-> Layout follows librmcs: `frame_view.hpp` contains public L3 frame values;
-> `camera.hpp` / `error.*` / `error_codes.h` are the
-> platform-free interface and error layers, `c_api/` is the C ABI plus its
-> platform-free implementations, and `k230/` is the only place that may include
-> SDK headers or the C ABI. The current C boundary is
-> [c_api/camera.h](c_api/camera.h) and [error_codes.h](error_codes.h); the C++
-> entry point is `dart::camera::k230::create<N>()` in
-> [k230/camera.hpp](k230/camera.hpp). Historical validation text below is not
-> evidence for the current code. No board execution is validated:
-> **BLOCKED: hardware validation pending**.
+C++ 按职责包含带保护的 `.cpp`，通过 `dart_camera_acl` INTERFACE 目标
+取得 C ABI 依赖；不再提供 C++ 头文件。C 数据面保留 `.c` / `.h`。
+`dart_camera_checks` 在主机和交叉构建中逐文件检查独立依赖。
 
-The C data plane owns camera initialization, frame leases, mappings and
-DMA cache synchronization. The C++ control plane exposes `ICamera`
-(`camera.hpp`), implemented for this board by `dart::camera::k230::Camera<N>`.
-Only the C data-plane implementation includes K230 or POSIX device/runtime headers. There is no
-host implementation of MPP: host builds compile pure configuration, exposure
-calculation and lease logic only.
+| 文件 | 类 / 职责 |
+|---|---|
+| `frame_view.cpp` | `FrameView`，L3 只读帧数据 |
+| `interface.cpp` | `ICamera` 及其配置、能力、取帧结果契约 |
+| `frame_lease.cpp` | `FrameLease` 的移动与释放语义，以及后端槽位与受限构造入口 |
+| `error.cpp` | 错误分类、上下文、原生码翻译及有界诊断文本 |
+| `k230/camera.cpp` | `Camera<N>`，K230 生命周期、曝光调整与 C ABI 适配 |
 
-L4 detectors include only `camera/frame_view.hpp` and depend on the header-only
-`dart_camera_types` target. It supplies no device code, SDK include paths or
-platform link flags. The application composition root selects `dart_camera_acl`
-and the concrete K230 camera.
+曝光设置在 `Camera<N>::set_fixed_exposure_us()` 内完成：检查状态、查询传感器
+范围、向内取整并钳位，最后换算成秒写入。请求值、范围和实际指令仅在诊断
+上下文中保留，不再构造单独的规划结果或规划器。
+
+```cpp
+#include "camera/k230/camera.cpp"
+
+auto created = dart::camera::k230::Camera<4>::create(config);
+if (!created) {
+    const auto& error = created.error(); // 直接持有错误值，无需解引用错误指针。
+    // 根据 error.kind() / error.code() 决定恢复动作。
+}
+```
+
+相机操作返回 `std::expected<T, CameraError>`。错误保存定长错误码、分类和上下文，
+可平凡复制，不使用继承、虚函数或动态分配。原生错误码以及传感器模式、帧几何、
+缓存、曝光和释放失败的专用诊断字段集中保留在 `error.cpp`。
+租约析构或移动覆盖时若释放失败，槽位用 `std::optional<CameraError>` 保存错误；
+相机下一次受保护操作先重试释放，再继续工作。无帧和容量耗尽仍是正常取帧结果。
+
+L4 只依赖 `camera/frame_view.cpp` 与 `dart_camera_types`，应用组合根选择具体相机。
+代码通过主机回归和交叉链接验证；下面的硬件说明仍需真实板端验证。
 
 ## Exposure
 
@@ -84,7 +96,7 @@ When every slot is already held, acquire does not touch the driver at all: it
 reports `DART_CAMERA_E_LEASE_EXHAUSTED`, the frame stays in the driver pool and is
 recycled there. That is a drop, not a failure, so a pipeline counts it instead of
 logging an error. On the C++ side the capacity is a compile-time parameter of the
-factory (`dart::camera::k230::create<N>`), which sizes the lease slots statically and
+factory (`dart::camera::k230::Camera<N>::create`), which sizes the lease slots statically and
 removes the per-frame allocation; `capacity()` and `outstanding()` let a producer
 apply its own bounded-drop policy before calling `acquire()`.
 
@@ -129,7 +141,7 @@ cmake -S . -B /tmp/dart-camera-cross \
   -DK230_SDK_ROOT=/mnt/mydata/kRTOSSDK \
   -DDART_CAMERA_K230=ON
 cmake --build /tmp/dart-camera-cross \
-  --target dart_camera_k230 dart_camera_acl
+  --target dart_camera_k230 dart_camera_checks
 ```
 
 `K230_MPP_LIB_DIR` and `K230_LINK_SCRIPT` are explicit override points for other

@@ -6,15 +6,23 @@ Y8，再写成 PGM（或阈值打包后的 PBM）。硬件 H.264 需要后续独
 不会把厂商句柄带入这个运行时服务。本模块包含线程管理和具体文件系统操作，
 放在 `runtime/`；L4 算法不依赖它。构建目标在 `runtime/CMakeLists.txt` 中声明。
 
-## 消费方式（二选一，不能同时）
+## 类与消费方式
 
-`recorder.cpp` 把声明与实现合并在一个带包含保护的翻译单元里，**没有**
-`recorder.hpp`，因此：
+包含 `runtime/recordor/recorder.cpp`，并通过 `dart_recording`（别名 `dart_recorder`）
+INTERFACE 目标取得相机 C 数据面和线程依赖。类外方法均为 `inline`，可供多个
+翻译单元共同包含。`dart_recording_checks` 逐文件编译全部类。
 
-- **include 方式**（当前唯一已落地消费者 `app/application.cpp`）：
-  `#include "runtime/recordor/recorder.cpp"`，**不要**再链接 `dart_recording`，否则重复定义。
-- **链接方式**：链接 `dart_recording`（别名 `dart_recorder`）。这条路径目前没有头文件
-  可包含，需要先补一个声明头。
+| 文件 | 职责 |
+|---|---|
+| `recorder.cpp` | `Recorder`，放行、固定队列、线程、释放调度及嵌套的 `Stats` |
+| `session.cpp` | `Session`，轮次编号、目录创建与保留清理 |
+| `image_writer.cpp` | `ImageWriter`，接收像素与文件名，负责帧拷贝及 PGM/PBM 编码写入 |
+| `event_writer.cpp` | `EventWriter`，事件 CSV、缓冲与刷新 |
+| `error.cpp` | `RecorderError`，错误状态、系统错误码与路径 |
+| `config.cpp` | 录像配置、事件与事件回调的共享契约 |
+
+图像队列槽位是 `Recorder` 的私有类型；释放队列直接保存租约，事件队列直接
+保存事件。队列计数维护容量与有效区间，图像写入器不依赖队列类型。
 
 ## 放行和所有权
 
@@ -44,7 +52,7 @@ if (acquired && acquired->status == dart::camera::AcquireStatus::kFrame) {
 租约”一直占用，因而也包含当前拷贝中的帧和 release 队列中的帧。录像线程拷贝
 完成后不直接调用相机 `release()`，而是把租约放入固定的 release 队列；采集线程
 每拍调用 `drain_releases()`，保证相机 ACL 的调用仍然串行。停止录像后也要先
-drain，随后才能停止/销毁相机。一个 Recorder 成功启动后只允许 stop 一次，不会
+drain，随后才能停止/销毁相机。一个 Recorder 成功启动后不能再次 start；stop 可重复调用，不会
 通过再次 start 重置未释放的租约。
 
 ## 文件和对应记录

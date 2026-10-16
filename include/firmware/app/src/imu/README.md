@@ -4,9 +4,11 @@
 
 | 文件 | 层 | 内容 |
 |---|---|---|
-| `imu_sample.hpp` | L3 抽象 | 值类型（`Vector3f`/`Quaternionf`/`Vector3i16`/`RawCounts`/`SampleFlag`/`Sample`/`ErrorCode`）与 `IImu` 接口 |
-| `estimator.hpp` / `estimator.cpp` | 计算 | `QualityEvent`/`EstimatorConfig`/`Estimate`/`SeedResult` 与 `Estimator` |
-| `k230/iim42622.hpp` / `k230/iim42622.cpp` | L2 适配器 | `k230::Iim42622`，唯一 include `spi/iim42622.h` 的地方 |
+| `math_types.cpp` | L3 数据 | 向量与四元数，字段直接表达数学值 |
+| `sample.cpp` | L3 数据 | 原始计数、采样值、单位和时间戳 |
+| `interface.cpp` | L3 抽象 | `IImu` 采样源接口 |
+| `estimator.cpp` | 计算 | `Estimator`、嵌套的 `Config` / `Estimate` / `SeedResult` / `QualityEvent` 及无分配估计逻辑 |
+| `k230/iim42622.cpp` | L2 适配器 | `k230::Iim42622`，唯一包含 `spi/iim42622.h` 的 C++ 类 |
 
 `IImu` 只是采样源：`read_sample()` 返回原始 ADC 计数、SI 值和一个单调时间戳。
 加速度是比力（m/s²），角速度是 rad/s，均在传感器/机体坐标下。寄存器配置和
@@ -21,16 +23,19 @@
 
 估计器质量门限会拒绝带标志/饱和、非有限、越限和突变步进的样本，不把它们积分
 进去。超过 `max_integration_interval_ns` 的时间戳间隔只上报并用于重置下一个积分
-区间。阈值都在 `EstimatorConfig` 里；默认 seed 门限要求重力模长误差在 2 m/s²
+区间。阈值都在 `Estimator::Config` 里；默认 seed 门限要求重力模长误差在 2 m/s²
 以内、角速度低于 0.15 rad/s。
 
 目前只有驱动和估计器 API，没有上层消费者。IIM-42622 的偏航角靠陀螺积分，
 没有绝对航向传感器就会漂移；速度同样会受加速度计零偏和姿态误差影响。
 
+消费者包含对应的职责文件 `.cpp`，类外方法内联；CMake 的 `dart_imu` / `dart_imu_k230`
+为 INTERFACE 目标，`dart_imu_checks` 对所有层级的文件逐一编译。
+
 ## 构建
 
 ```bash
-cmake --preset host    # dart_imu：只编估计器（主机，供 clangd 使用）
+cmake --preset host    # 主机编译所有 IMU 类检查目标，供 clangd 使用
 cmake --preset cross   # DART_IMU_K230=ON：dart_imu + dart_imu_k230（链接 dart_iim42622）
 ```
 

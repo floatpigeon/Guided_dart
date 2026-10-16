@@ -98,5 +98,10 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/runtime")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/app")
 
+include(CTest)
+if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
+  add_subdirectory(tests)
+endif()
+
 message(STATUS "K230_SDK_ROOT        = ${K230_SDK_ROOT}")
 message(STATUS "K230_TOOLCHAIN_DIR   = ${K230_TOOLCHAIN_DIR}")
