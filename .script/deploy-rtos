@@ -102,7 +102,7 @@ deploy_network() {
     for i in "${!NAMES[@]}"; do
         dst="${RTOS_DIR}/${NAMES[i]}"
         scp -q "${SOURCES[i]}" "${BOARD_USER}@${RTOS_TARGET}:${dst}"
-        if [[ "${NAMES[i]}" != startup_final.list ]]; then
+        if [[ "${NAMES[i]}" == launcher || "${NAMES[i]}" == dart_app ]]; then
             rtos_ssh "chmod 755 '${dst}'"
         fi
         local_md5="$(md5sum "${SOURCES[i]}" | cut -d' ' -f1)"
@@ -149,7 +149,7 @@ deploy_card() {
         mv -f -- "${STAGED_FILE}" "${dst}"
         STAGED_FILE=''
         same_file "${SOURCES[i]}" "${dst}" || die "${NAMES[i]} 替换后校验失败"
-        if [[ "${NAMES[i]}" != startup_final.list ]]; then
+        if [[ "${NAMES[i]}" == launcher || "${NAMES[i]}" == dart_app ]]; then
             if ! chmod 755 "${dst}" 2>/dev/null && [[ "${chmod_warned}" == 0 ]]; then
                 warn "该文件系统不支持 chmod；板端挂载时需提供可执行权限"
                 chmod_warned=1

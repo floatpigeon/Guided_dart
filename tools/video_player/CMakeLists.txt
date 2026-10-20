@@ -17,7 +17,7 @@ target_link_libraries(dart_video_player INTERFACE Qt${QT_VERSION_MAJOR}::Widgets
 add_executable(video_player main.cpp)
 target_link_libraries(video_player PRIVATE dart_video_player)
 
-foreach(component recording image_view player)
+foreach(component recording_types csv image_reader recording image_view player)
     add_library(video_player_${component}_check OBJECT ${component}.cpp)
     target_link_libraries(video_player_${component}_check PRIVATE dart_video_player)
 endforeach()

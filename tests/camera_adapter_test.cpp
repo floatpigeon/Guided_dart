@@ -3,9 +3,7 @@
 #include <array>
 #include <cassert>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
-#include <limits>
 
 #include "camera/k230/camera.cpp"
 
@@ -29,9 +27,9 @@ struct CameraFake {
     int acquire_result = DART_CAMERA_OK;
     int exposure_result = DART_CAMERA_OK;
     int stop_result = DART_CAMERA_OK;
-    float min_exposure_us = 10.2F;
-    float max_exposure_us = 1000.8F;
-    float applied_seconds = 0.0F;
+    std::uint32_t min_exposure_lines = 4;
+    std::uint32_t max_exposure_lines = 65509;
+    std::uint32_t applied_lines = 0;
     int exposure_calls = 0;
 };
 
@@ -123,38 +121,53 @@ int dart_camera_get_caps(const dart_camera_t*, dart_camera_caps_t* caps) {
     *caps = {};
     caps->abi_version = DART_CAMERA_ABI_VERSION;
     caps->struct_size = sizeof(*caps);
-    caps->sensor_width = fake.config.sensor_width;
-    caps->sensor_height = fake.config.sensor_height;
-    caps->sensor_fps = fake.config.sensor_fps;
-    caps->output_width = fake.config.output_width;
-    caps->output_height = fake.config.output_height;
+    caps->sensor_width = 640;
+    caps->sensor_height = 480;
+    caps->sensor_fps = 30;
+    caps->output_width = 320;
+    caps->output_height = 240;
     caps->exposure_mode = fake.config.exposure_mode;
     return DART_CAMERA_OK;
 }
 
-int dart_camera_get_exposure_range(const dart_camera_t*, float* min_us, float* max_us) {
-    *min_us = fake.min_exposure_us;
-    *max_us = fake.max_exposure_us;
+int dart_camera_get_exposure_range(
+    const dart_camera_t*, std::uint32_t* min_lines, std::uint32_t* max_lines) {
+    *min_lines = fake.min_exposure_lines;
+    *max_lines = fake.max_exposure_lines;
     return DART_CAMERA_OK;
 }
 
-int dart_camera_set_exposure_seconds(dart_camera_t*, float seconds) {
-    fake.applied_seconds = seconds;
+int dart_camera_set_exposure_lines(dart_camera_t*, std::uint32_t lines) {
+    fake.applied_lines = lines;
     ++fake.exposure_calls;
     return fake.exposure_result;
 }
 } // extern "C"
 
-camera::Config camera_config() {
-    camera::Config config{};
-    config.sensor_width = 640;
-    config.sensor_height = 480;
-    config.sensor_fps = 30;
-    config.output_width = 320;
-    config.output_height = 240;
-    config.capture_buffers = config.channel_buffers = 3;
-    config.initial_exposure_us = 100;
+camera::Controls camera_config() {
+    camera::Controls config{};
+    config.initial_exposure_lines = 2560;
     return config;
+}
+
+void automatic_mode() {
+    fake = {};
+    auto created = camera::k230::Camera<4>::create();
+    assert(created);
+    assert(
+        fake.config.sensor_width == 0 && fake.config.sensor_height == 0
+        && fake.config.sensor_fps == 0);
+    assert(fake.config.output_width == 0 && fake.config.output_height == 0);
+    assert(fake.config.max_outstanding_frames == 4 && fake.config.channel_buffers >= 4);
+    assert(fake.config.binary_threshold == 50);
+    assert(fake.config.raw10_layout == DART_CAMERA_RAW10_PACKED_LSB);
+    assert(created.value()->frame_info().width == 320);
+    assert(created.value()->frame_info().height == 240);
+    assert(created.value()->start());
+    assert(fake.exposure_calls == 0);
+    auto frame = created.value()->acquire(std::chrono::milliseconds{0});
+    assert(frame && frame->status == camera::AcquireStatus::kFrame);
+    assert(frame->lease.release());
 }
 
 void release_retry() {
@@ -215,7 +228,7 @@ void exposure_rollback(bool fail_stop) {
     } else {
         assert(created.value()->state() == camera::State::kInitialized);
         assert(error.operation() == camera::Operation::kSetExposure);
-        assert(error.context().has_exposure && error.context().requested_us == 100.0F);
+        assert(error.context().has_exposure && error.context().requested_lines == 2560);
     }
     fake.stop_result = DART_CAMERA_OK;
     created.value().reset();
@@ -227,37 +240,35 @@ void exposure_adjustment() {
     auto created = camera::k230::Camera<1>::create(camera_config());
     assert(created && created.value()->start());
     auto& camera = *created.value();
-    assert(std::abs(fake.applied_seconds - 0.000100F) < 1e-9F);
-    fake.max_exposure_us = 20.8F;
-    assert(camera.set_fixed_exposure_us(1));
-    assert(std::abs(fake.applied_seconds - 0.000011F) < 1e-9F);
-    assert(camera.set_fixed_exposure_us(99));
-    assert(std::abs(fake.applied_seconds - 0.000020F) < 1e-9F);
-    assert(camera.set_fixed_exposure_us(15));
-    assert(std::abs(fake.applied_seconds - 0.000015F) < 1e-9F);
+    assert(fake.applied_lines == 2560);
+    fake.max_exposure_lines = 20;
+    assert(camera.set_fixed_exposure_lines(1));
+    assert(fake.applied_lines == 4);
+    assert(camera.set_fixed_exposure_lines(99));
+    assert(fake.applied_lines == 20);
+    assert(camera.set_fixed_exposure_lines(15));
+    assert(fake.applied_lines == 15);
 
-    const std::array<std::array<float, 2>, 7> invalid_ranges{{
-        {20.0F, 10.0F}, {10.2F, 10.8F}, {-1.0F, 10.0F},
-        {NAN, 10.0F}, {0.0F, NAN}, {0.0F, INFINITY}, {0.0F, 4294967296.0F}}};
+    const std::array<std::array<std::uint32_t, 2>, 3> invalid_ranges{{{20, 10}, {0, 10}, {0, 0}}};
     for (const auto& range : invalid_ranges) {
-        fake.min_exposure_us = range[0];
-        fake.max_exposure_us = range[1];
+        fake.min_exposure_lines = range[0];
+        fake.max_exposure_lines = range[1];
         const auto calls = fake.exposure_calls;
-        auto adjusted = camera.set_fixed_exposure_us(10);
+        auto adjusted = camera.set_fixed_exposure_lines(10);
         assert(!adjusted && fake.exposure_calls == calls);
         const auto& error = adjusted.error();
         assert(error.kind() == camera::ErrorKind::kExposure);
         assert(error.code() == DART_CAMERA_E_OUT_OF_RANGE);
         assert(error.operation() == camera::Operation::kSetExposure);
-        assert(error.context().has_exposure && error.context().requested_us == 10.0F);
-        assert((std::isnan(range[0]) && std::isnan(error.context().min_us))
-               || error.context().min_us == range[0]);
+        assert(error.context().has_exposure && error.context().requested_lines == 10);
+        assert(error.context().min_lines == range[0]);
     }
 }
 
 } // namespace dart::tests
 
 int main() {
+    dart::tests::automatic_mode();
     dart::tests::release_retry();
     dart::tests::exposure_adjustment();
     dart::tests::exposure_rollback(false);

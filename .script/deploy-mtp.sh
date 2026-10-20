@@ -79,6 +79,7 @@ printf '目标：%s（板端 /sdcard/app）\n旧文件备份：%s\n' "${APP}" "$
 for i in "${!NAMES[@]}"; do
     dst="${APP}/${NAMES[i]}"
     if gio info "${dst}" >/dev/null 2>&1; then
+        mkdir -p "${BACKUP_DIR}/$(dirname "${NAMES[i]}")"
         gio copy -T "${dst}" "${BACKUP_DIR}/${NAMES[i]}"
         verify "${BACKUP_DIR}/${NAMES[i]}" "${dst}" || die "旧文件备份校验失败：${NAMES[i]}"
         HAD_OLD+=(1)
@@ -126,4 +127,4 @@ if [[ -z "${ONLY}" ]]; then
 fi
 printf '\n部署完成；日志和录像已保留。旧文件备份：%s\n' "${BACKUP_DIR}"
 printf '板端验证：/sdcard/app/launcher -t\n'
-printf '注意：写入不会重启正在运行的进程；请对板子执行一次完整复位/断电重启后，最新 ELF 和 startup_final.list 才会由开机自启动器加载。\n'
+printf '注意：写入不会重启当前进程；dart_app 在启动器下次拉起时加载，startup_final.list 需重启启动器或板子后加载。\n'

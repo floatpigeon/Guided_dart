@@ -1,27 +1,6 @@
 # Concrete runtime services and process supervision, outside the L4 domain.
 # Module subdirectories contain sources and README files; targets live here.
 
-# ---------------------------------------------------------------------------
-# recording：灰度证据录像，按职责包含 .cpp
-# 租约、放行与 release 队列的约定见 runtime/recordor/README.md
-# 与 dart_camera_acl 一致启用 -fno-exceptions -fno-rtti：错误路径走返回码，
-# 线程创建用 pthread_create（见 recorder.cpp 的 image_thread_entry）。
-#
-# 所有方法均内联；INTERFACE 目标只传播依赖，OBJECT 目标逐文件检查源码。
-# ---------------------------------------------------------------------------
-add_library(dart_recording INTERFACE)
-add_library(dart_recorder ALIAS dart_recording)
-target_compile_features(dart_recording INTERFACE cxx_std_23)
-target_compile_options(dart_recording INTERFACE -Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti)
-target_include_directories(dart_recording
-    INTERFACE
-        "${PROJECT_SOURCE_DIR}"
-        "${PROJECT_SOURCE_DIR}/include/firmware/app/src")
-target_link_libraries(dart_recording INTERFACE dart_camera_acl Threads::Threads)
-file(GLOB_RECURSE _recording_classes CONFIGURE_DEPENDS "recordor/*.cpp")
-add_library(dart_recording_checks OBJECT ${_recording_classes})
-target_link_libraries(dart_recording_checks PRIVATE dart_recording)
-
 # IMU acquisition, shared estimator state and asynchronous raw/estimate log.
 add_library(dart_imu_logging INTERFACE)
 target_link_libraries(dart_imu_logging INTERFACE dart_imu Threads::Threads)

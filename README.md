@@ -4,9 +4,9 @@
 不编译、不烧录固件；板子上必须是已支持 RT-Smart 用户态（lwp）的固件，
 交叉编译出的静态 ELF 才能直接运行。
 
-已落地：相机 C 数据面 + C++ ACL（`include/firmware/app/src/camera/`）、IMU/SPI
+已落地：相机 C 数据面 + C++ ACL（`include/firmware/src/camera/`）、IMU/SPI
 （`.../imu/`、`.../spi/`）、识别与 ROI（`src/detector/`）、灰度取证录像
-（`runtime/recordor/`）、业务应用入口与组件编排（`app/dart_entry.cpp`、`app/application.cpp`）、开机自启动器与清单
+（`include/firmware/src/recorder/`）、L4 业务入口与功能编排（`src/`）、开机自启动器与清单
 （`runtime/launcher/`）、构建/部署脚本（`.script/`）。
 
 先读 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)（分层与依赖方向），
@@ -24,26 +24,28 @@
 
 ## 1. 业务代码放在哪里？（最重要）
 
-`src/` 是 **L4 领域与策略**，只依赖 L3 公开数据和抽象接口；应用组合根放在
-`app/`，进程管理与具体运行时服务放在 `runtime/`，L3/L2 设备模块继续放在
-`include/firmware/app/src/`。各目录的 `CMakeLists.txt` 分别声明本目录目标。
+`src/` 全部属于 L4，按启动、视觉、录像、诊断和检测功能组织调用与策略。
+设备、线程、文件系统、日志和编码的下层实现统一放在 `include/firmware/src/`。
+`runtime/` 保留进程启动器与本轮不迁移的 IMU 采样服务。
+各目录的 `CMakeLists.txt` 分别声明本目录目标，模块依赖保持分离。
 
 | 目录 | 内容 | 目标 / 产物 |
 |---|---|---|
 | `runtime/launcher/` | 开机自启动器（纯 POSIX C11，平台无关）+ `startup.list` 母版 | `launcher` → `build-cross/launcher/launcher` |
-| `app/dart_entry.cpp`、`app/application.cpp` | 业务进程入口与应用编排：配置、组件组装、运行与退出 | `dart_app` → `build-cross/dart_app/dart_app` |
+| `src/dart_entry.cpp`、`src/{startup,vision,recording,diagnostics}/` | L4 入口、配置、流程与故障决策 | `dart_app` → `build-cross/dart_app/dart_app` |
 | `src/detector/` | L4 灯/装甲板检测与 ROI，只消费帧数据 | `dart_detection`（INTERFACE，包含类 `.cpp`） |
-| `runtime/recordor/` | 录像线程与 PGM/PBM 文件写入 | `dart_recording`（INTERFACE，包含类 `.cpp`） |
+| `include/firmware/src/recorder/` | 录像队列、线程、逐帧 PNG 与旧 PGM/PBM 流 | `dart_recording`（INTERFACE，包含类 `.cpp`） |
 | `runtime/imu/` | 独立 IMU 采样、上层共用的积分状态和异步原始/积分日志 | `dart_imu_logging`（INTERFACE，包含类 `.cpp`） |
-| `include/firmware/app/src/camera/` | L3 帧数据/相机抽象 + L2/C 数据面实现 | `dart_camera_types` / `dart_camera_core` / `dart_camera_k230` / `dart_camera_acl` |
-| `include/firmware/app/src/{imu,spi}/` | IMU 抽象/估计器 + SPI 驱动 + K230 适配器 | `dart_imu` / `dart_iim42622` / `dart_imu_k230` |
+| `include/firmware/src/camera/` | L3 帧数据/相机抽象 + L2/C 数据面实现 | `dart_camera_types` / `dart_camera_core` / `dart_camera_k230` / `dart_camera_acl` |
+| `include/firmware/src/{imu,spi}/` | IMU 抽象/估计器 + SPI 驱动 + K230 适配器 | `dart_imu` / `dart_iim42622` / `dart_imu_k230` |
+| `include/firmware/src/{board,system,logging,storage}/` | 板级组装、进程资源、日志与目录操作 | `dart_board` / `dart_platform` |
 | `.script/` | 构建、部署、板端清理和相机回归检查；`install-rtos` 可注册短命令 | — |
-| [`tools/`](tools/README.md) | 主机 Qt 录像播放器、IMU 日志转 ROS 2 bag 与 Foxglove 启动工具 | 独立主机工具 |
+| [`tools/`](tools/README.md) | 主机播放器、IMU 日志工具与独立 RAW 相机诊断探针 | 独立构建的工具 |
 
-`dart_entry.cpp` 转交程序入口，`application.cpp` 组合参数解析、采集流程和退出标记；相机、
-IMU、识别、录像和控制的具体实现留在各自模块。可选 IMU 采样已独立运行，
+`dart_entry.cpp` 将板级工厂注入 `startup/run.cpp`，启动流程调用视觉、录像与诊断模块；
+设备初始化和系统资源操作由 `include/` 的实现承担。可选 IMU 采样已独立运行，
 后续控制任务也由应用统一组装，按各自频率运行。`launcher` 负责进程启动与监督。应用说明见
-[`app/README.md`](app/README.md)。
+[`src/startup/README.md`](src/startup/README.md)。
 
 硬件资源是独占的：**同一时刻只能有一个进程持有 VICAP/VB**，所以"识别"和"录像"
 合在 `dart_app` 一个 ELF 里，清单里也只能出现一条。详见
@@ -58,8 +60,8 @@ C++ 文件按紧密相关的职责组织：相关值类型可以同文件，只�
 帧数据、设备接口等确有独立消费者的契约可以单独保留。
 消费者包含带包含保护的 `.cpp`；类外方法和普通函数使用 `inline`，模板保留完整定义。
 每个可包含文件仅在 includes 后声明一次具名命名空间，不使用匿名命名空间、
-`using namespace` 或命名空间别名。进程入口 `dart_entry.cpp` 仅包含应用实现，
-由全局 `main()` 直接调用 `run_application()`。
+`using namespace` 或命名空间别名。进程入口 `dart_entry.cpp` 仅连接板级工厂与 L4 启动流程，
+由全局 `main()` 调用 `run_application()`。
 文件名按所在目录省略重复信息，例如 `detector/armor.cpp`。
 C 数据面继续使用 `.c` / `.h`。
 
@@ -90,10 +92,16 @@ dart/
 │   ├── check-camera-pool.sh           # 相机资源池与生命周期的 host 回归检查
 │   ├── board.env.example              # 板子地址配置示例（board.env 已被 gitignore）
 │   └── README.md                      # 命令用法与依赖
-├── src/                               # L4 领域算法与策略
-├── app/                               # 应用入口、具体组件选择与生命周期组装
-├── runtime/                           # 录像线程/文件写入、launcher 与启动清单
-├── include/                           # 公共接口 + 固件侧库目标声明
+├── src/                               # 业务入口、应用编排与领域算法
+│   ├── dart_entry.cpp                 # 业务进程入口
+│   ├── startup/                       # L4 参数、服务组装与生命周期
+│   ├── vision/                        # L4 采集、识别与帧分发
+│   ├── recording/                     # L4 录像配置与启停决策
+│   ├── diagnostics/                   # L4 诊断字段与检测记录
+│   ├── detector/                      # L4 检测与 ROI
+│   └── CMakeLists.txt                 # 分别声明领域库与业务应用目标
+├── runtime/                           # launcher、启动清单与现有 IMU 采样服务
+├── include/                           # 下层接口、设备/系统/录像实现及库目标声明
 ├── docs/                              # 设计、调试与验收契约
 ├── CMakePresets.json                  # host / cross 两个预设
 └── CMakeLists.txt                     # 顶层构建骨架
@@ -113,6 +121,26 @@ export K230_TOOLCHAIN_DIR=/path/to/riscv64-musl/bin     # 探测不到时显式�
 环境要求：`cmake >= 3.20`、`ninja`、`scp`（网络部署用）。SDK 位于
 `/mnt/mydata/kRTOSSDK`（仅用于提供 SDK 头文件与链接脚本；用 `K230_SDK_ROOT` 或
 `-DK230_SDK_ROOT=...` 覆盖）。
+
+HAL 头文件和库只取 SDK `.config` 的 `CONFIG_BOARD_CONFIG_NAME` 对应输出目录，
+避免 SDK 保留多块板子的构建产物时误链旧板库。使用其它固件输出时可显式设置
+`cmake --preset cross -DK230_SDK_OUTPUT_DIR=/path/to/sdk/output/<board_defconfig>`。
+
+新版 Dart V1 固件的 SC038HGS 使用 CSI2、640 × 480 RAW10。应用通过 MCM 直采并
+直接按 `raw10 >= --threshold × 4` 输出 0/255 二值 Y8，识别与录像共用同一图像，
+不依赖 ISP 标定文件。录像默认保存独立的 1-bit PNG 无损图片，每轮图片实际总量最多 500 MB；
+每 32 张分组，达到容量上限后停止录像，识别继续运行。
+`/data` 分区另设 2 GB（2,000,000,000 字节）总占用保护，计入旧录像、日志和分配开销，
+并预留 64 MiB；空间不足时停止录像并保留已有文件。
+本机 MCM RAW10 的 DDR 排列已通过 640×480 渐变图逐像素验证：
+默认 `--raw-layout packed10-lsb`，每 4 个像素按低位连续打包为 5 字节，每行 800 字节。
+后端同时修正本机 SDK 把 DMA 字节跨度当成输入像素宽度的问题；更换固件时需重新验证。
+应用默认通过曝光接口设置 2560 行曝光（`--exp 2560`）；K230 后端同步设置
+帧长 VTS=2571，通过现有传感器寄存器接口完成，无需修改固件或标定像素时钟。
+`--exp 0` 保留传感器初始化曝光；RAW 路径不支持 `--ae`。
+开机清单使用 `--exp 900`，避免 2560 行曝光限制 60 FPS 录像。此前连续 PBM 版本实测录像
+55.881 FPS，在 499,995,987 字节正常停录；目标场景曝光/阈值尚未标定，详见 [实板记录](src/startup/README.md#验证状态)。
+适配细节及板端验证步骤见 [相机说明](include/firmware/src/camera/README.md#sc038hgs--dart-v1)。
 
 ## 4. 编译
 
@@ -236,7 +264,7 @@ make && 烧录固件
 - **SDK 路径不同**：`export K230_SDK_ROOT=/你的SDK路径` 后再 `build-rtos`。
 - **`Cannot find source file`**：模块目录改名后没同步所属目录的 `CMakeLists.txt`（曾在
   `recording/`→`recordor/` 改名时发生过），路径以本文件 §1 表格为准。
-- **板端提示"已在运行"**：上一轮 launcher 未退干净，检查 `/sdcard/app/logs/*.pid`。
+- **板端提示"已在运行"**：上一轮 launcher 未退干净，检查 `/data/app/logs/*.pid`。
 - **clangd 无补全**：确认 `build-cross/compile_commands.json` 存在（跑过一次
   `build-rtos`），并已安装 clangd 扩展。
 - **与固件的关系**：本仓库不编译、不烧录固件；板子上必须是已支持 RT-Smart

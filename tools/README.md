@@ -1,8 +1,12 @@
-# 主机工具
+# 主机工具与板端诊断探针
 
-本目录的 Qt 播放器、Python 和 ROS 2 launch XML 只在主机运行，不参与板端 CMake、
+本目录的 Qt 播放器、Python 和 ROS 2 launch XML 只在主机运行，不参与板端应用 CMake、
 交叉编译或部署。Python 使用标准库组织解析、时间轴和几何计算；ROS 2 导入集中在
 bag 写入边界，无需创建 ROS package 或运行 colcon。
+
+[`sc038hgs_raw/`](sc038hgs_raw/README.md) 是单独交叉构建的板端相机诊断探针，
+包含 RAW 转换器和历史 ISP 对照资源。它不参与正式应用的构建或部署，
+手动运行时独占相机资源。
 
 ## 录像逐帧播放器
 

@@ -11,6 +11,7 @@
 #include <mutex>
 #include <new>
 #include <pthread.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "imu/estimator.cpp"
@@ -29,17 +30,25 @@ public:
         std::uint64_t written = 0;
         std::uint64_t dropped = 0;
         std::uint64_t io_errors = 0;
+        std::uint64_t log_bytes = 0;
+        bool log_limit_reached = false;
     };
 
+    static constexpr std::uint64_t kDefaultLogLimitBytes = 32ULL * 1024 * 1024;
+
     explicit Session(IImu& source, const Estimator::Config& config = {}) noexcept
-        : source_(source), config_(config), estimator_(config) {}
+        : source_(source)
+        , config_(config)
+        , estimator_(config) {}
     ~Session() { stop(); }
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
     /* One run per instance. The application may request an initial stationary
      * seed; reset() never silently seeds again. Paths must already have parents. */
-    bool start(const char* path, std::uint32_t period_us = 1000, bool initial_seed = false) noexcept;
+    bool start(
+        const char* path, std::uint32_t period_us = 1000, bool initial_seed = false,
+        std::uint64_t log_limit_bytes = kDefaultLogLimitBytes) noexcept;
     void stop() noexcept;
     Estimator::Estimate current() const noexcept;
     Estimator::SeedResult seed(const Quaternionf& sensor_to_reference) noexcept;
@@ -73,6 +82,7 @@ private:
     void sample_loop() noexcept;
     void writer_loop() noexcept;
     bool write_event(const Event& event) noexcept;
+    bool write_log(const char* data, int length, std::size_t capacity) noexcept;
     static void* sample_entry(void* context) noexcept {
         static_cast<Session*>(context)->sample_loop();
         return nullptr;
@@ -94,7 +104,7 @@ private:
     std::unique_ptr<Event[]> queue_{};
     std::size_t head_ = 0, tail_ = 0, count_ = 0;
     bool writer_stopping_ = false;
-    bool accepting_ = false; // Protected by state_mutex_.
+    bool accepting_ = false;            // Protected by state_mutex_.
     std::mutex sleep_mutex_;
     std::condition_variable sample_wake_;
     std::atomic<bool> sampling_{false};
@@ -102,11 +112,17 @@ private:
     pthread_t sample_thread_{}, writer_thread_{};
     bool sample_started_ = false, writer_started_ = false, used_ = false;
     std::FILE* file_ = nullptr;
-    std::atomic<std::uint64_t> samples_{0}, read_errors_{0}, written_{0}, dropped_{0}, io_errors_{0};
+    std::atomic<std::uint64_t> samples_{0}, read_errors_{0}, written_{0}, dropped_{0},
+        io_errors_{0};
+    std::atomic<std::uint64_t> log_bytes_{0};
+    std::atomic<bool> log_limit_reached_{false};
+    std::uint64_t log_limit_bytes_ = kDefaultLogLimitBytes;
 };
 
-inline bool Session::start(const char* path, std::uint32_t period_us, bool initial_seed) noexcept {
-    if (used_ || path == nullptr || path[0] == '\0' || period_us == 0)
+inline bool Session::start(
+    const char* path, std::uint32_t period_us, bool initial_seed,
+    std::uint64_t log_limit_bytes) noexcept {
+    if (used_ || path == nullptr || path[0] == '\0' || period_us == 0 || log_limit_bytes == 0)
         return false;
     queue_.reset(new (std::nothrow) Event[kQueueCapacity]);
     if (!queue_)
@@ -114,30 +130,42 @@ inline bool Session::start(const char* path, std::uint32_t period_us, bool initi
     file_ = std::fopen(path, "a");
     if (file_ == nullptr)
         return false;
+    struct stat file_status{};
+    if (::fstat(::fileno(file_), &file_status) != 0 || file_status.st_size < 0) {
+        std::fclose(file_);
+        file_ = nullptr;
+        return false;
+    }
+    log_bytes_.store(static_cast<std::uint64_t>(file_status.st_size));
+    log_limit_bytes_ = log_limit_bytes;
     used_ = true;
     writer_stopping_ = false;
     period_us_ = period_us;
     initial_seed_pending_ = initial_seed;
-    const bool header_ok = std::fprintf(
-        file_, "# imu_log version=1 start_ns=%llu period_us=%u initial_seed=%d "
-               "queue_capacity=%zu queue_bytes=%zu max_interval_ns=%llu "
-               "max_acceleration_m_s2=%.9g max_rate_rad_s=%.9g "
-               "max_acceleration_step_m_s2=%.9g max_rate_step_rad_s=%.9g "
-               "seed_gravity_tolerance_m_s2=%.9g seed_max_rate_rad_s=%.9g\n"
-               "event,sequence,recorded_ns,timestamp_ns,generation,quality_events,"
-               "sample_accepted,integrated,has_reference_frame,command_accepted,command_quality_events,"
-               "read_error,dropped,raw_ax,raw_ay,raw_az,raw_gx,raw_gy,raw_gz,"
-               "ax_m_s2,ay_m_s2,az_m_s2,gx_rad_s,gy_rad_s,gz_rad_s,temperature_c,sample_flags,"
-               "qw,qx,qy,qz,roll_rad,pitch_rad,yaw_rad,wx_rad_s,wy_rad_s,wz_rad_s,"
-               "linear_ax_m_s2,linear_ay_m_s2,linear_az_m_s2,vx_m_s,vy_m_s,vz_m_s,"
-               "rotation_x_rad,rotation_y_rad,rotation_z_rad,seed_qw,seed_qx,seed_qy,seed_qz\n",
+    char header[2048];
+    const int header_length = std::snprintf(
+        header, sizeof(header),
+        "# imu_log version=1 start_ns=%llu period_us=%u initial_seed=%d log_limit_bytes=%llu "
+        "queue_capacity=%zu queue_bytes=%zu max_interval_ns=%llu "
+        "max_acceleration_m_s2=%.9g max_rate_rad_s=%.9g "
+        "max_acceleration_step_m_s2=%.9g max_rate_step_rad_s=%.9g "
+        "seed_gravity_tolerance_m_s2=%.9g seed_max_rate_rad_s=%.9g\n"
+        "event,sequence,recorded_ns,timestamp_ns,generation,quality_events,"
+        "sample_accepted,integrated,has_reference_frame,command_accepted,command_quality_events,"
+        "read_error,dropped,raw_ax,raw_ay,raw_az,raw_gx,raw_gy,raw_gz,"
+        "ax_m_s2,ay_m_s2,az_m_s2,gx_rad_s,gy_rad_s,gz_rad_s,temperature_c,sample_flags,"
+        "qw,qx,qy,qz,roll_rad,pitch_rad,yaw_rad,wx_rad_s,wy_rad_s,wz_rad_s,"
+        "linear_ax_m_s2,linear_ay_m_s2,linear_az_m_s2,vx_m_s,vy_m_s,vz_m_s,"
+        "rotation_x_rad,rotation_y_rad,rotation_z_rad,seed_qw,seed_qx,seed_qy,seed_qz\n",
         static_cast<unsigned long long>(now_ns()), period_us, initial_seed ? 1 : 0,
-        kQueueCapacity, sizeof(Event) * kQueueCapacity,
+        static_cast<unsigned long long>(log_limit_bytes_), kQueueCapacity,
+        sizeof(Event) * kQueueCapacity,
         static_cast<unsigned long long>(config_.max_integration_interval_ns),
         config_.max_acceleration_m_s2, config_.max_angular_velocity_rad_s,
         config_.max_acceleration_step_m_s2, config_.max_angular_velocity_step_rad_s,
-        config_.seed_gravity_tolerance_m_s2, config_.seed_max_angular_velocity_rad_s) >= 0;
-    if (!header_ok || std::fflush(file_) != 0) {
+        config_.seed_gravity_tolerance_m_s2, config_.seed_max_angular_velocity_rad_s);
+    const bool header_ok = write_log(header, header_length, sizeof(header));
+    if ((!header_ok && !log_limit_reached_.load()) || std::fflush(file_) != 0) {
         ++io_errors_;
         stop();
         return false;
@@ -184,13 +212,17 @@ inline void Session::stop() noexcept {
         writer_started_ = false;
     }
     if (file_ != nullptr) {
-        if (std::fprintf(
-                file_, "# session_end samples=%llu read_errors=%llu written=%llu dropped=%llu io_errors=%llu\n",
-                static_cast<unsigned long long>(samples_.load()),
-                static_cast<unsigned long long>(read_errors_.load()),
-                static_cast<unsigned long long>(written_.load()),
-                static_cast<unsigned long long>(dropped_.load()),
-                static_cast<unsigned long long>(io_errors_.load())) < 0)
+        char footer[256];
+        const int footer_length = std::snprintf(
+            footer, sizeof(footer),
+            "# session_end samples=%llu read_errors=%llu written=%llu dropped=%llu "
+            "io_errors=%llu\n",
+            static_cast<unsigned long long>(samples_.load()),
+            static_cast<unsigned long long>(read_errors_.load()),
+            static_cast<unsigned long long>(written_.load()),
+            static_cast<unsigned long long>(dropped_.load()),
+            static_cast<unsigned long long>(io_errors_.load()));
+        if (!write_log(footer, footer_length, sizeof(footer)) && !log_limit_reached_.load())
             ++io_errors_;
         if (std::fflush(file_) != 0)
             ++io_errors_;
@@ -240,7 +272,8 @@ inline void Session::reset() noexcept {
 }
 
 inline Session::Stats Session::stats() const noexcept {
-    return {samples_.load(), read_errors_.load(), written_.load(), dropped_.load(), io_errors_.load()};
+    return {samples_.load(),   read_errors_.load(), written_.load(),          dropped_.load(),
+            io_errors_.load(), log_bytes_.load(),   log_limit_reached_.load()};
 }
 
 inline void Session::enqueue(Event event) noexcept {
@@ -248,6 +281,10 @@ inline void Session::enqueue(Event event) noexcept {
         return;
     event.sequence = ++sequence_;
     event.recorded_ns = now_ns();
+    if (log_limit_reached_.load()) {
+        ++dropped_;
+        return;
+    }
     {
         // The writer only holds this lock to copy a single event, never for I/O.
         std::lock_guard lock(queue_mutex_);
@@ -302,7 +339,8 @@ inline void Session::writer_loop() noexcept {
         Event event{};
         {
             std::unique_lock lock(queue_mutex_);
-            queue_ready_.wait_until(lock, next_flush, [this] { return count_ > 0 || writer_stopping_; });
+            queue_ready_.wait_until(
+                lock, next_flush, [this] { return count_ > 0 || writer_stopping_; });
             if (count_ == 0 && writer_stopping_)
                 break;
             if (count_ > 0) {
@@ -314,6 +352,8 @@ inline void Session::writer_loop() noexcept {
         if (event.sequence != 0) {
             if (write_event(event))
                 ++written_;
+            else if (log_limit_reached_.load())
+                ++dropped_;
             else
                 ++io_errors_;
         }
@@ -328,6 +368,8 @@ inline void Session::writer_loop() noexcept {
 }
 
 inline bool Session::write_event(const Event& event) noexcept {
+    if (log_limit_reached_.load())
+        return false;
     const auto& e = event.estimate;
     const auto& s = e.sample;
     const auto& a = s.raw_counts.accelerometer;
@@ -341,26 +383,45 @@ inline bool Session::write_event(const Event& event) noexcept {
     case EventKind::kReset: kind = "reset"; break;
     case EventKind::kReadError: kind = "read_error"; break;
     }
-    return std::fprintf(
-        file_, "%s,%llu,%llu,%llu,%llu,%u,%d,%d,%d,%d,%u,%d,%llu,"
-               "%d,%d,%d,%d,%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u,"
-               "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
-               "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+    char row[2048];
+    const int length = std::snprintf(
+        row, sizeof(row),
+        "%s,%llu,%llu,%llu,%llu,%u,%d,%d,%d,%d,%u,%d,%llu,"
+        "%d,%d,%d,%d,%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u,"
+        "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+        "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
         kind, static_cast<unsigned long long>(event.sequence),
         static_cast<unsigned long long>(event.recorded_ns),
-        static_cast<unsigned long long>(s.timestamp_ns), static_cast<unsigned long long>(e.generation),
-        e.quality_events, e.sample_accepted, e.integrated, e.has_reference_frame,
-        event.command_accepted, event.command_quality_events, event.read_error,
-        static_cast<unsigned long long>(event.dropped), a.x, a.y, a.z, g.x, g.y, g.z,
-        s.acceleration_m_s2.x, s.acceleration_m_s2.y, s.acceleration_m_s2.z,
+        static_cast<unsigned long long>(s.timestamp_ns),
+        static_cast<unsigned long long>(e.generation), e.quality_events, e.sample_accepted,
+        e.integrated, e.has_reference_frame, event.command_accepted, event.command_quality_events,
+        event.read_error, static_cast<unsigned long long>(event.dropped), a.x, a.y, a.z, g.x, g.y,
+        g.z, s.acceleration_m_s2.x, s.acceleration_m_s2.y, s.acceleration_m_s2.z,
         s.angular_velocity_rad_s.x, s.angular_velocity_rad_s.y, s.angular_velocity_rad_s.z,
-        s.temperature_c, s.flags, q.w, q.x, q.y, q.z,
-        e.attitude_rpy_rad.x, e.attitude_rpy_rad.y, e.attitude_rpy_rad.z,
-        e.angular_velocity_rad_s.x, e.angular_velocity_rad_s.y, e.angular_velocity_rad_s.z,
-        e.linear_acceleration_m_s2.x, e.linear_acceleration_m_s2.y, e.linear_acceleration_m_s2.z,
-        e.velocity_m_s.x, e.velocity_m_s.y, e.velocity_m_s.z,
-        e.cumulative_rotation_rad.x, e.cumulative_rotation_rad.y, e.cumulative_rotation_rad.z,
-        r.w, r.x, r.y, r.z) >= 0;
+        s.temperature_c, s.flags, q.w, q.x, q.y, q.z, e.attitude_rpy_rad.x, e.attitude_rpy_rad.y,
+        e.attitude_rpy_rad.z, e.angular_velocity_rad_s.x, e.angular_velocity_rad_s.y,
+        e.angular_velocity_rad_s.z, e.linear_acceleration_m_s2.x, e.linear_acceleration_m_s2.y,
+        e.linear_acceleration_m_s2.z, e.velocity_m_s.x, e.velocity_m_s.y, e.velocity_m_s.z,
+        e.cumulative_rotation_rad.x, e.cumulative_rotation_rad.y, e.cumulative_rotation_rad.z, r.w,
+        r.x, r.y, r.z);
+    return write_log(row, length, sizeof(row));
+}
+
+inline bool Session::write_log(const char* data, int length, std::size_t capacity) noexcept {
+    if (log_limit_reached_.load())
+        return false;
+    if (length < 0 || static_cast<std::size_t>(length) >= capacity)
+        return false;
+    const auto bytes = static_cast<std::uint64_t>(length);
+    const auto used = log_bytes_.load();
+    // The cap applies across application restarts; preserve existing data.
+    if (used >= log_limit_bytes_ || bytes > log_limit_bytes_ - used) {
+        log_limit_reached_.store(true);
+        return false;
+    }
+    const auto written = std::fwrite(data, 1, static_cast<std::size_t>(length), file_);
+    log_bytes_.fetch_add(written);
+    return written == static_cast<std::size_t>(length);
 }
 
 } // namespace dart::imu

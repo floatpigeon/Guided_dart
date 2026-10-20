@@ -29,9 +29,11 @@ class ImuSessionTest final {
             std::lock_guard lock(mutex_);
             pending_ = sample;
         }
+
     private:
         std::mutex mutex_;
-        std::expected<imu::Sample, imu::ErrorCode> pending_{std::unexpected(imu::ErrorCode::kBusTransfer)};
+        std::expected<imu::Sample, imu::ErrorCode> pending_{
+            std::unexpected(imu::ErrorCode::kBusTransfer)};
     };
 
     struct Expected {
@@ -42,7 +44,8 @@ class ImuSessionTest final {
         imu::Quaternionf reference{};
     };
 
-    static imu::Estimator::Estimate feed(imu::Session& session, Source& source, const imu::Sample& sample) {
+    static imu::Estimator::Estimate
+        feed(imu::Session& session, Source& source, const imu::Sample& sample) {
         const auto count = session.stats().samples;
         source.push(sample);
         for (int i = 0; i < 500 && session.stats().samples == count; ++i)
@@ -147,7 +150,7 @@ public:
         state = feed(session, source, sample);
         assert(state.integrated && state.velocity_m_s.x > 0 && state.cumulative_rotation_rad.z > 0);
         expected.push_back({"sample", state});
-        seeded = session.seed({}); // Moving samples cannot start a new integral.
+        seeded = session.seed({});             // Moving samples cannot start a new integral.
         assert(!seeded.accepted && seeded.generation == 1);
         expected.push_back({"seed", session.current(), false, seeded.quality_events});
 
@@ -224,7 +227,9 @@ public:
             assert(std::stoull(row.at("sequence")) == ++previous_sequence);
             assert(std::stoull(row.at("recorded_ns")) > 0);
             if (row.at("event") == "read_error") {
-                assert(std::stoi(row.at("read_error")) == static_cast<int>(imu::ErrorCode::kBusTransfer));
+                assert(
+                    std::stoi(row.at("read_error"))
+                    == static_cast<int>(imu::ErrorCode::kBusTransfer));
                 continue;
             }
             assert(next < expected.size());
@@ -247,6 +252,39 @@ public:
         sample.timestamp_ns += 10'000'000;
         assert(!feed(initial, initial_source, sample).has_reference_frame);
         initial.stop();
+
+        // Reaching the disk budget must leave sampling and estimation running.
+        const auto limited_path = std::filesystem::path{directory} / "limited.log";
+        Source limited_source;
+        imu::Session limited{limited_source};
+        constexpr std::uint64_t limit = 4096;
+        assert(limited.start(limited_path.c_str(), 1000, false, limit));
+        for (int i = 0; i < 500 && !limited.stats().log_limit_reached; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        assert(limited.stats().log_limit_reached);
+        sample = {};
+        sample.acceleration_m_s2.z = 9.80665F;
+        sample.timestamp_ns = 3'000'000'000;
+        assert(feed(limited, limited_source, sample).sample_accepted);
+        assert(limited.seed({}).accepted);
+        limited.stop();
+        assert(limited.stats().io_errors == 0 && limited.stats().dropped > 0);
+        const auto capped_size = std::filesystem::file_size(limited_path);
+        assert(capped_size <= limit && capped_size == limited.stats().log_bytes);
+
+        // Existing logs are preserved and count against the next run's budget.
+        std::ifstream preserved_input{limited_path};
+        const std::string preserved{std::istreambuf_iterator<char>{preserved_input}, {}};
+        imu::Session resumed{limited_source};
+        assert(resumed.start(limited_path.c_str(), 1000, false, capped_size));
+        assert(resumed.stats().log_limit_reached);
+        sample.timestamp_ns += 10'000'000;
+        assert(feed(resumed, limited_source, sample).sample_accepted);
+        resumed.stop();
+        std::ifstream resumed_input{limited_path};
+        const std::string after_resume{std::istreambuf_iterator<char>{resumed_input}, {}};
+        assert(preserved == after_resume);
+        assert(resumed.stats().io_errors == 0 && resumed.stats().written == 0);
 
         imu::Session full{source};
         assert(!full.start("/dev/full"));

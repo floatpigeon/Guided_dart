@@ -1,5 +1,5 @@
 # ===========================================================================
-# include/ —— 固件侧库目标的唯一构建文件
+# include/ —— L3/L2 接口和实现库目标的唯一构建文件
 #
 # 约定：模块目录（camera/、spi/、imu/ …）只放源码和 README，不再各自持有
 # CMakeLists.txt；所有库目标在这里集中声明，新增模块在下面追加一节即可。
@@ -9,8 +9,8 @@
 # C++ 适配器链接它，因此 spi 一节必须排在 imu 之前。
 # ===========================================================================
 
-set(_dart_app_include "${CMAKE_CURRENT_SOURCE_DIR}/firmware/app/include")
-set(_dart_src "${CMAKE_CURRENT_SOURCE_DIR}/firmware/app/src")
+set(_dart_include "${CMAKE_CURRENT_SOURCE_DIR}/firmware/include")
+set(_dart_src "${CMAKE_CURRENT_SOURCE_DIR}/firmware/src")
 set(_camera_dir "${_dart_src}/camera")
 set(_spi_dir "${_dart_src}/spi")
 set(_imu_dir "${_dart_src}/imu")
@@ -46,12 +46,12 @@ function(_dart_camera_add_library target)
         message(STATUS "${target}: no sources enabled")
     endif()
     target_include_directories(${target} ${_scope}
-        "${_dart_app_include}"
+        "${_dart_include}"
         "${_dart_src}")
     set(${target}_scope "${_scope}" PARENT_SCOPE)
 endfunction()
 
-_dart_camera_add_library(dart_camera_core c_api/config.c c_api/lease.c)
+_dart_camera_add_library(dart_camera_core c_api/config.c c_api/lease.c c_api/raw10.c)
 target_compile_features(dart_camera_core ${dart_camera_core_scope} c_std_11)
 
 # Editor support: clangd can only use sources that have a compile command, and a
@@ -69,12 +69,13 @@ if(DART_CAMERA_CLANGD_COMMANDS AND NOT DART_CAMERA_K230)
         "${_camera_dir}/k230/lifecycle.c"
         "${_camera_dir}/k230/media.c"
         "${_camera_dir}/k230/frame.c"
+        "${_camera_dir}/k230/mcm.c"
         "${_camera_dir}/k230/exposure.c")
     target_link_libraries(dart_camera_k230_compile_commands PRIVATE k230_rtos_app)
     target_compile_features(dart_camera_k230_compile_commands PRIVATE c_std_11)
     target_compile_options(dart_camera_k230_compile_commands PRIVATE -Wall -Wextra -Wpedantic)
     target_include_directories(dart_camera_k230_compile_commands PRIVATE
-        "${_dart_app_include}"
+        "${_dart_include}"
         "${_dart_src}")
     # A header has no compile command of its own, so clangd borrows one from a
     # neighbouring file. Marking k230/internal.h as a compilable source gives it
@@ -96,11 +97,28 @@ if(DART_CAMERA_K230)
             message(FATAL_ERROR "Missing K230 MPP library: lib${_library}.a")
         endif()
     endforeach()
+    # The backend owns the audited private ABI. The standalone probe reads the
+    # same manifest; changing either SDK library must re-run this check.
+    set(_mcm_abi_path "${_camera_dir}/k230/mcm_abi.json")
+    file(READ "${_mcm_abi_path}" _mcm_abi)
+    string(JSON _checked_vicap_user GET "${_mcm_abi}" "userapps/lib/libvicap.a")
+    string(JSON _checked_vicap_kernel GET "${_mcm_abi}" "kernel/lib/libvicap.a")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${_mcm_abi_path}"
+        "${K230_MPP_LIB_DIR}/libvicap.a"
+        "${K230_SDK_ROOT}/src/rtsmart/mpp/kernel/lib/libvicap.a")
+    file(SHA256 "${K230_MPP_LIB_DIR}/libvicap.a" _vicap_user_hash)
+    file(SHA256 "${K230_SDK_ROOT}/src/rtsmart/mpp/kernel/lib/libvicap.a" _vicap_kernel_hash)
+    if(NOT _vicap_user_hash STREQUAL _checked_vicap_user
+       OR NOT _vicap_kernel_hash STREQUAL _checked_vicap_kernel)
+        message(FATAL_ERROR "VICAP libraries changed; review the RAW10 MCM ioctl ABI before updating ${_mcm_abi_path}")
+    endif()
     if(NOT EXISTS "${K230_LINK_SCRIPT}")
         message(FATAL_ERROR "Missing RT-Smart linker script: ${K230_LINK_SCRIPT}")
     endif()
     _dart_camera_add_library(dart_camera_k230
-        k230/lifecycle.c k230/media.c k230/frame.c k230/exposure.c)
+        k230/lifecycle.c k230/media.c k230/frame.c k230/exposure.c k230/mcm.c)
+    target_link_options(dart_camera_k230 INTERFACE -Wl,--wrap=ioctl)
     target_link_libraries(dart_camera_k230 ${dart_camera_k230_scope} dart_camera_core)
     if(dart_camera_k230_scope STREQUAL "PUBLIC")
         set(_sdk_scope PRIVATE)
@@ -122,7 +140,7 @@ endif()
 
 add_library(dart_camera_acl INTERFACE)
 target_compile_features(dart_camera_acl INTERFACE cxx_std_23)
-target_include_directories(dart_camera_acl INTERFACE "${_dart_app_include}" "${_dart_src}")
+target_include_directories(dart_camera_acl INTERFACE "${_dart_include}" "${_dart_src}")
 target_link_libraries(dart_camera_acl INTERFACE dart_camera_types dart_camera_core)
 target_compile_options(dart_camera_acl INTERFACE
     -Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti)
@@ -215,3 +233,65 @@ if(DART_IMU_CLANGD_COMMANDS AND NOT DART_IMU_K230)
     target_sources(dart_imu_k230_compile_commands PRIVATE
         "${_spi_dir}/iim42622.h")
 endif()
+
+# ---------------------------------------------------------------------------
+# System adapters: process lifetime, logging and filesystem implementation.
+# ---------------------------------------------------------------------------
+add_library(dart_platform INTERFACE)
+target_compile_features(dart_platform INTERFACE cxx_std_23)
+target_compile_options(dart_platform INTERFACE
+    -Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti)
+target_include_directories(dart_platform INTERFACE "${_dart_src}" "${PROJECT_SOURCE_DIR}")
+file(GLOB_RECURSE _platform_classes CONFIGURE_DEPENDS
+    "${_dart_src}/system/*.cpp" "${_dart_src}/logging/*.cpp" "${_dart_src}/storage/*.cpp")
+add_library(dart_platform_checks OBJECT ${_platform_classes})
+target_link_libraries(dart_platform_checks PRIVATE dart_platform dart_camera_acl)
+
+# ---------------------------------------------------------------------------
+# recording：灰度证据录像，按职责包含 .cpp
+# 租约、放行与 release 队列的约定见 include/firmware/src/recorder/README.md
+# 与 dart_camera_acl 一致启用 -fno-exceptions -fno-rtti：错误路径走返回码，
+# 线程创建用 pthread_create（见 recorder.cpp 的 image_thread_entry）。
+#
+# 所有方法均内联；INTERFACE 目标只传播依赖，OBJECT 目标逐文件检查源码。
+# ---------------------------------------------------------------------------
+add_library(dart_recording INTERFACE)
+add_library(dart_recorder ALIAS dart_recording)
+target_compile_features(dart_recording INTERFACE cxx_std_23)
+target_compile_options(dart_recording INTERFACE -Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti)
+target_include_directories(dart_recording
+    INTERFACE
+        "${PROJECT_SOURCE_DIR}"
+        "${PROJECT_SOURCE_DIR}/include/firmware/src")
+if(CMAKE_CROSSCOMPILING)
+    set(DART_ZLIB_INCLUDE_DIR "${K230_SDK_ROOT}/src/rtsmart/libs/3rd-party/libwebsockets/libwebsockets/win32port/zlib"
+        CACHE PATH "SDK zlib headers (stable zlib 1.x ABI)")
+    set(DART_ZLIB_LIBRARY "${K230_SDK_ROOT}/src/rtsmart/libs/opencv/lib/opencv4/3rdparty/libzlib.a"
+        CACHE FILEPATH "RT-Smart zlib static library")
+    if(NOT EXISTS "${DART_ZLIB_INCLUDE_DIR}/zlib.h" OR NOT EXISTS "${DART_ZLIB_LIBRARY}")
+        message(FATAL_ERROR "PNG recording needs DART_ZLIB_INCLUDE_DIR and DART_ZLIB_LIBRARY")
+    endif()
+    add_library(dart_zlib INTERFACE)
+    target_include_directories(dart_zlib SYSTEM INTERFACE "${DART_ZLIB_INCLUDE_DIR}")
+    target_link_libraries(dart_zlib INTERFACE "${DART_ZLIB_LIBRARY}")
+else()
+    find_package(ZLIB REQUIRED)
+    add_library(dart_zlib ALIAS ZLIB::ZLIB)
+endif()
+target_link_libraries(dart_recording INTERFACE dart_camera_acl Threads::Threads dart_zlib)
+file(GLOB_RECURSE _recording_classes CONFIGURE_DEPENDS "${_dart_src}/recorder/*.cpp")
+add_library(dart_recording_checks OBJECT ${_recording_classes})
+target_link_libraries(dart_recording_checks PRIVATE dart_recording)
+
+# ---------------------------------------------------------------------------
+# Board composition: concrete device factories and initialization stay below L4.
+# dart_imu_logging is declared by runtime/ after this directory is configured.
+# ---------------------------------------------------------------------------
+add_library(dart_board INTERFACE)
+target_link_libraries(dart_board INTERFACE dart_platform dart_camera_acl dart_imu_logging)
+if(DART_IMU_K230)
+    target_compile_definitions(dart_board INTERFACE DART_APP_IMU_K230=1)
+    target_link_libraries(dart_board INTERFACE dart_imu_k230)
+endif()
+add_library(dart_board_checks OBJECT "${_dart_src}/board/k230.cpp")
+target_link_libraries(dart_board_checks PRIVATE dart_board)

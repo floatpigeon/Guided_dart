@@ -3,7 +3,7 @@
 
 #include "camera/frame_lease.cpp"
 #include "imu/estimator.cpp"
-#include "runtime/recordor/recorder.cpp"
+#include "recorder/recorder.cpp"
 #include "src/detector/roi.cpp"
 
 namespace dart::tests {

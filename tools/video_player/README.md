@@ -3,7 +3,7 @@
 移植来源：远程 `origin/k230_v1` 的 `tools/video_player`，提交
 [`a739026`](https://github.com/hyperle/Guided_dart/tree/a7390262203f2565876aef1d2a8b628b2722d79f/tools/video_player)。
 保留 Qt Widgets 的滑块、左右键、图像缩放、像素点击和检测叠加，按当前 v2
-的 PGM/PBM、录像 CSV 和检测 CSV 重写数据关联。与 v1 一样为手动逐帧浏览，
+的逐帧 PNG、旧版 PGM/PBM 连续流及逐帧文件、录像 CSV 和检测 CSV 重写数据关联。与 v1 一样为手动逐帧浏览，
 不按时间自动播放。支持 Qt 5 / Qt 6，不依赖 ROS、SDK 或板端构建。
 
 ## 构建与打开
@@ -15,7 +15,7 @@
 # 自动增量构建并打开；也可从其他目录调用 .script/player 的绝对路径。
 bash .script/player records/rec_0001
 
-# 同时存在 PGM/PBM 时，默认一起显示；-r 仅看 PGM，-f 仅看 PBM。
+# 默认显示 PNG/PGM/PBM；--png 仅看 PNG，-r 仅看 PGM，-f 仅看 PBM。
 bash .script/player -r records/rec_0001
 
 # 拷贝位置不同可显式指定两个 CSV；包含空格的路径加引号。
@@ -43,20 +43,24 @@ cmake --build build/video_player --parallel
 records/
   detection.csv
   rec_0001/
-    img/frame_00000001.pgm       # 或 .pbm
+    img/b0000001/p0000001/00000001.png  # 每组 32 张，支持后续 b0000001/p0000002
+    img/b0000001/p0000001/00000002.png
     logs/frames.csv
 ```
 
-**检测日志必须来自同一轮运行。** 当前 `app/DetectionCsv` 用 `"w"` 打开
+**检测日志必须来自同一轮运行。** 当前 `src/diagnostics/detection_csv.cpp` 用 `"w"` 打开
 `records/detection.csv`，下一次启动会覆盖它；旧 `rec_NNNN` 目录可能仍在。
 每轮结束后应将对应的 `detection.csv` 连同该轮目录一起归档，或启动时通过
 `--det-csv` 指定不同路径。已被覆盖的数据无法从图片恢复，播放器会显示未匹配。
 
 ## 图片、文字与叠加如何对应
 
-1. 按实际存在的 `img/frame_*.pgm` / `.pbm` 的完整数字编号排序，只加载当前帧图片。
-2. 用 `frames.csv` 的 **`image_file`** 精确匹配图片路径，校验 `decision=accepted`
-   和 `image_index`。`image_index` 是落盘图片的编号，不是输入帧号或 CSV 行号。
+1. 对 `img/recording.pgm` / `.pbm` 扫描帧头并建立字节偏移索引，跳过像素负载；
+   复位导致的不完整尾帧会提示并忽略。独立 PNG 支持 `img/bNNNNNNN/pNNNNNNN/00000001.png`，兼容旧版 `img/frame_*.pgm` / `.pbm`；按图片数字编号排序。
+   只读取和解码当前选中帧，不把整个录像载入内存。
+2. 用 `frames.csv` 的 **`image_file + file_offset`** 精确匹配连续帧，校验 `file_bytes`、
+   `decision=accepted` 和 `image_index`。独立图片用包含分组目录的完整 `image_file`；PNG 同时校验 `file_offset=0` 与 `file_bytes` 等于磁盘文件长度，冲突时停用该帧关联。
+   `image_index` 是输出帧的编号，不是输入帧号或 CSV 行号。
 3. 用录像行的 **`source_sequence + received_us + source_pts`** 精确匹配检测行的
    **`sequence + received_us + source_pts`**，并核对检测的 `admission=accepted`。
 4. 右侧显示对应 CSV 的路径、物理行号、原始文本及全部列，便于回查原始记录。
@@ -92,10 +96,12 @@ python3 tests/check_cpp_structure.py
 未匹配/冲突的图片。成功返回 0，关联不完整或解析失败返回 1，命令参数错误返回 2。
 若没有检测 CSV，仅以录像关联判断完整性；不代表已经验证了检测结果。
 
-`recording.cpp` 管理 CSV 与关联，`image_view.cpp` 管理显示和原图坐标映射，
-`player.cpp` 组合窗口与命令入口，`main.cpp` 仅转交入口。可包含 `.cpp` 使用包含保护、
+`recording_types.cpp` 定义帧和 CSV 行数据，`csv.cpp` 负责 CSV 解析，
+`image_reader.cpp` 负责逐帧解码，`recording.cpp` 扫描文件并关联录像/检测记录；
+`image_view.cpp` 管理显示和原图坐标映射，`player.cpp` 组合窗口与命令入口，
+`main.cpp` 仅转交入口。可包含 `.cpp` 使用包含保护、
 单个具名命名空间及 inline 定义；CMake 分别编译每个组件以验证独立包含。
-测试使用 Qt offscreen 平台，不需要实际显示器，覆盖真实 PGM/PBM 解码、非整字节 PBM
+测试使用 Qt offscreen 平台，不需要实际显示器，覆盖真实 PNG/PGM/PBM 解码、PNG 跨分组目录关联及偏移/长度冲突、非整字节 PBM
 行宽、序号/时间身份、缺图与重复记录、关闭识别、叠加边界、切帧和像素点击。
 
 2026-10-16 在本机 Qt 5.15.13 / GCC 13.3 上独立构建和 CTest 通过，

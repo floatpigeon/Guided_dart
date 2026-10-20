@@ -3,8 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 # ============================================================================
 # K230D / K230 RT-Smart 用户态业务应用仓库（与固件无关）
 #
-# src/ 只放 L4 领域算法；include/ 声明 L3/L2 库，runtime/ 放运行时服务，
-# app/ 是应用组合根。各目录的 CMakeLists.txt 分别声明本目录目标。
+# src/ 按功能放 L4 调用与策略；include/ 声明下层接口和实现库，
+# runtime/ 保留启动器和独立 IMU 服务。各目录分别声明本目录目标。
 # 业务应用 dart_app 与进程启动器 launcher 分别生成 RT-Smart 可执行程序（ELF）。
 #
 # 构建方式（交叉编译，目标 rv64imafdcv / lp64d，musl 静态链接）：
@@ -63,18 +63,48 @@ foreach(_inc
 endforeach()
 
 # 3) rtsmart_hal（外设 HAL 驱动头文件，随板卡配置输出）
-file(GLOB _hal_incs "${K230_SDK_ROOT}/output/*/rtsmart/libs/rtsmart_hal/include")
-foreach(_inc IN LISTS _hal_incs)
-  target_include_directories(k230_rtos_app INTERFACE "${_inc}")
-endforeach()
-
-file(GLOB _hal_lib_dirs "${K230_SDK_ROOT}/output/*/rtsmart/libs/rtsmart_hal/lib")
-foreach(_lib_dir IN LISTS _hal_lib_dirs)
-  target_link_directories(k230_rtos_app INTERFACE "${_lib_dir}")
-endforeach()
-if(_hal_lib_dirs)
+set(K230_SDK_OUTPUT_DIR "" CACHE PATH "SDK output directory for the firmware board")
+set(_sdk_output "${K230_SDK_OUTPUT_DIR}")
+if(NOT _sdk_output AND EXISTS "${K230_SDK_ROOT}/.config")
+  file(STRINGS "${K230_SDK_ROOT}/.config" _board_config
+      REGEX "^CONFIG_BOARD_CONFIG_NAME=\"[^\"]+\"$")
+  if(_board_config)
+    string(REGEX REPLACE "^CONFIG_BOARD_CONFIG_NAME=\"([^\"]+)\"$" "\\1"
+        _board_config "${_board_config}")
+    set(_sdk_output "${K230_SDK_ROOT}/output/${_board_config}")
+  endif()
+endif()
+if(NOT _sdk_output)
+  file(GLOB _hal_roots "${K230_SDK_ROOT}/output/*/rtsmart/libs/rtsmart_hal")
+  list(LENGTH _hal_roots _hal_count)
+  if(_hal_count GREATER 1)
+    message(FATAL_ERROR "Multiple SDK boards found; set K230_SDK_OUTPUT_DIR to the firmware output directory")
+  elseif(_hal_count EQUAL 1)
+    list(GET _hal_roots 0 _hal_root)
+    get_filename_component(_sdk_output "${_hal_root}/../../.." ABSOLUTE)
+  endif()
+endif()
+set(_hal_root "${_sdk_output}/rtsmart/libs/rtsmart_hal")
+if(CMAKE_CROSSCOMPILING AND (NOT EXISTS "${_hal_root}/include" OR NOT EXISTS "${_hal_root}/lib"))
+  message(FATAL_ERROR "HAL missing for selected SDK board: ${_sdk_output}; check K230_SDK_OUTPUT_DIR")
+endif()
+if(EXISTS "${_hal_root}/include" AND EXISTS "${_hal_root}/lib")
+  target_include_directories(k230_rtos_app INTERFACE "${_hal_root}/include")
+  target_link_directories(k230_rtos_app INTERFACE "${_hal_root}/lib")
   # fpioa (also used by SPI) calls utils_map_memory from libutils.
-  target_link_libraries(k230_rtos_app INTERFACE -Wl,--start-group pwm i2c gpio fpioa spi utils -Wl,--end-group)
+  # Keep the mutually dependent HAL archives in one linker argument. CMake can
+  # deduplicate separate group delimiters against the MPP group after target
+  # dependencies are flattened, leaving SPI's GPIO/FPIOA references unresolved.
+  target_link_libraries(k230_rtos_app INTERFACE
+      "-Wl,--start-group,-lpwm,-li2c,-lgpio,-lfpioa,-lspi,-lutils,--end-group")
+  if(CMAKE_CROSSCOMPILING)
+    # The toolchain's statfs64 bridge returns an empty result on this RT-Smart
+    # firmware. Use the SDK's native syscall adapters for statvfs and mutexes.
+    if(NOT EXISTS "${_hal_root}/lib/libk230_syscalls.a")
+      message(FATAL_ERROR "RT-Smart syscall adapters missing: ${_hal_root}/lib/libk230_syscalls.a")
+    endif()
+    target_link_libraries(k230_rtos_app INTERFACE k230_syscalls)
+  endif()
 endif()
 
 # 4) 链接参数：与 SDK 一致 —— 使用 RT-Smart 链接脚本 + 静态链接
@@ -86,7 +116,7 @@ target_link_options(k230_rtos_app INTERFACE
     -Wl,--gc-sections)
 
 # ---------------------------------------------------------------------------
-# 按依赖方向声明公共抽象/设备库、L4 领域、运行时服务和应用组合根
+# 声明公共抽象/设备库、运行时服务，再声明业务入口、编排与领域目标
 # ---------------------------------------------------------------------------
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals/CMakeLists.txt")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/components/peripherals")
@@ -95,9 +125,8 @@ endif()
 # 模块子目录只放源码，不再各自持有 CMakeLists.txt。
 find_package(Threads REQUIRED)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/include")
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/runtime")
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/app")
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 include(CTest)
 if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
@@ -105,4 +134,5 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
 endif()
 
 message(STATUS "K230_SDK_ROOT        = ${K230_SDK_ROOT}")
+message(STATUS "K230 SDK output      = ${_sdk_output}")
 message(STATUS "K230_TOOLCHAIN_DIR   = ${K230_TOOLCHAIN_DIR}")

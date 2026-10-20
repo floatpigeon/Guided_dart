@@ -46,11 +46,11 @@ L1  C 数据面（纯 C）        camera.c / media / frame / exposure / config�
 
 ### 1.1 目录布局（新树）
 
-新文件全部落在 `include/firmware/app/src/camera/`；`src/` 整体删除。
+新文件全部落在 `include/firmware/src/camera/`；`src/` 整体删除。
 
 ```
-include/firmware/app/include/status.h          # 保留但本轮不接线/不修改：跨模块通用状态码（本模块不依赖它）
-include/firmware/app/src/camera/               # 模块根只放平台无关的接口与错误层
+include/firmware/include/status.h          # 保留但本轮不接线/不修改：跨模块通用状态码（本模块不依赖它）
+include/firmware/src/camera/               # 模块根只放平台无关的接口与错误层
 ├── camera.hpp              # L3 虚拟接口：ICamera / FrameLease / FrameView / AcquireResult / 类型化枚举
 ├── error.hpp / error.cpp   # L2 多态错误对象层次 + 翻译器 + 固定缓冲文本出口
 ├── error_codes.h           # C/C++ 共用：码空间划分宏 + dart 站点码表 + K230 SDK 码镜像表
@@ -81,14 +81,14 @@ include/firmware/app/src/camera/               # 模块根只放平台无关的�
 
 - `src/**`（含 `src/CMakeLists.txt`、`src/camera/README.md` 及全部 `.c/.h`）；
 - `include/camera/exposure_control.hpp`、`include/camera/exposure_adapter.hpp`（`IExposureControl` 并入 `ICamera`）；
-- `include/firmware/app/src/logger/error.h` 与 `logger/error.c`（后者为空文件），该目录一并移除。
+- `include/firmware/src/logger/error.h` 与 `logger/error.c`（后者为空文件），该目录一并移除。
 
 **三处遗留处置（已确认，T1 执行）**
 
 | 项 | 结论 | 理由 |
 |---|---|---|
-| `include/firmware/app/src/logger/error.{h,c}` | **删除**（见上删除清单） | `Error` 结构体 + `error_handler` 是"C 层构造错误对象"的 v1 思路；`CameraError` 的 `module`/`code`/`native`/`detail` 字段已由 §1.3 的多态错误对象承载，日志出口留在调用边界 |
-| `include/firmware/app/include/status.h` | **保留但本轮不接线**：不删除、不修改、不被 `camera.h` include，也不进入任何相机目标 | `dart_error_t`/`DART_OP_*` 不再是相机 ABI 的一部分；先不动，避免跨模块牵连，后续模块迁移时再统一处理 |
+| `include/firmware/src/logger/error.{h,c}` | **删除**（见上删除清单） | `Error` 结构体 + `error_handler` 是"C 层构造错误对象"的 v1 思路；`CameraError` 的 `module`/`code`/`native`/`detail` 字段已由 §1.3 的多态错误对象承载，日志出口留在调用边界 |
+| `include/firmware/include/status.h` | **保留但本轮不接线**：不删除、不修改、不被 `camera.h` include，也不进入任何相机目标 | `dart_error_t`/`DART_OP_*` 不再是相机 ABI 的一部分；先不动，避免跨模块牵连，后续模块迁移时再统一处理 |
 | C 侧状态/模式/帧标志枚举（你已从 `camera.h` 草稿中删掉） | **恢复到 `camera.h`**：`DART_CAMERA_STATE_*`、`DART_CAMERA_EXPOSURE_*`、`DART_CAMERA_FRAME_*` 作为 ABI 数值 | C 拥有状态机（`init/start/stop/deinit` 的合法性依赖它），C++ 不能凭空推断；C++ 侧建 `enum class State`/`ExposureMode` 镜像，用 `static_assert` 把两侧数值一一钉死（T3、T7） |
 
 **当前树的破损点，T1 必须一并修掉**
@@ -289,8 +289,8 @@ create_k230_camera(const Config &config) noexcept;
 
 ### 1.5 include 路径与 CMake
 
-- 导出 `include/firmware/app/include`（`#include "status.h"`）与 `include/firmware/app/src`（`#include "camera/camera.hpp"`）；
-- 模块内文件之间用引号**模块限定**包含（`#include "camera/k230/internal.h"`），根就是已导出的 `include/firmware/app/src`；与 librmcs 的仓库相对 include 同构，不再出现 `../`；
+- 导出 `include/firmware/include`（`#include "status.h"`）与 `include/firmware/src`（`#include "camera/camera.hpp"`）；
+- 模块内文件之间用引号**模块限定**包含（`#include "camera/k230/internal.h"`），根就是已导出的 `include/firmware/src`；与 librmcs 的仓库相对 include 同构，不再出现 `../`；
 - 目标划分（名字暂定，T1 定稿）：
 
 | 目标 | 源 | 何时构建 |
@@ -322,9 +322,9 @@ create_k230_camera(const Config &config) noexcept;
 
 ### T1 边界契约冻结 + 目录搬迁 + 构建骨架
 
-- **做什么**：把 §1.1–1.5 落成文件——`camera_error_codes.h`（码表 + 段宏 + SDK 镜像表）、`camera.h` v2（int-only；**恢复** `DART_CAMERA_STATE_*` / `DART_CAMERA_EXPOSURE_*` / `DART_CAMERA_FRAME_*` ABI 数值；去掉 `dart_error_t`、`dart_camera_get_error`、`dart_exposure_result_t`）、`camera/CMakeLists.txt`、顶层 `CMakeLists.txt`（去掉 `tests/expected_probe.cpp`，`add_subdirectory` 指向新模块目录，去掉 `src` 引用）、删除 `src/**`、`include/camera/*.hpp` 与 `include/firmware/app/src/logger/`、把 `src/camera/README.md` 平移到 `include/firmware/app/src/camera/README.md`（只改路径与失效引用，正文重写留下轮）。
-- **必读**：`include/firmware/app/src/camera/camera.h`、`include/firmware/app/include/status.h`（只读，不修改）、`CMakeLists.txt`、`src/CMakeLists.txt`、`src/camera/README.md`。
-- **完成判据**：`cmake -S . -B /tmp/dart-host -DDART_CAMERA_K230=OFF` 配置成功；`--build` 通过；`grep -rn "dart_error_t" include src` 为空；`src/`、`include/camera/`、`include/firmware/app/src/logger/` 均不存在；`camera.h` 里状态/模式/帧标志枚举齐备；`camera/README.md` 存在且无 `src/camera` 引用；`git status` 中 `status.h` 无改动。
+- **做什么**：把 §1.1–1.5 落成文件——`camera_error_codes.h`（码表 + 段宏 + SDK 镜像表）、`camera.h` v2（int-only；**恢复** `DART_CAMERA_STATE_*` / `DART_CAMERA_EXPOSURE_*` / `DART_CAMERA_FRAME_*` ABI 数值；去掉 `dart_error_t`、`dart_camera_get_error`、`dart_exposure_result_t`）、`camera/CMakeLists.txt`、顶层 `CMakeLists.txt`（去掉 `tests/expected_probe.cpp`，`add_subdirectory` 指向新模块目录，去掉 `src` 引用）、删除 `src/**`、`include/camera/*.hpp` 与 `include/firmware/src/logger/`、把 `src/camera/README.md` 平移到 `include/firmware/src/camera/README.md`（只改路径与失效引用，正文重写留下轮）。
+- **必读**：`include/firmware/src/camera/camera.h`、`include/firmware/include/status.h`（只读，不修改）、`CMakeLists.txt`、`src/CMakeLists.txt`、`src/camera/README.md`。
+- **完成判据**：`cmake -S . -B /tmp/dart-host -DDART_CAMERA_K230=OFF` 配置成功；`--build` 通过；`grep -rn "dart_error_t" include src` 为空；`src/`、`include/camera/`、`include/firmware/src/logger/` 均不存在；`camera.h` 里状态/模式/帧标志枚举齐备；`camera/README.md` 存在且无 `src/camera` 引用；`git status` 中 `status.h` 无改动。
 - **禁止**：不写空壳 `.c` 占位文件；不保留任何 `tests/` 引用；不修改、不删除、不让 `camera.h` include `status.h`。
 
 ### T2 C：媒体与输出池（`camera_media.c`）

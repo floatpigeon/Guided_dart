@@ -51,12 +51,25 @@ def check():
             prefix = re.sub(r'^\s*#.*$', '', prefix, flags=re.MULTILINE)
             if prefix.strip():
                 errors.append(f'{relative}: namespace must precede all declarations')
+        includes = re.findall(r'^\s*#\s*include\s*[<"]([^">]+)[">]', text, re.MULTILINE)
+        if relative.parts[0] == 'src':
+            for include in includes:
+                if (include.startswith(('sys/', 'camera/k230/', 'spi/'))
+                        or include in ('unistd.h', 'fcntl.h', 'pthread.h', 'signal.h', 'dirent.h')
+                        or re.match(r'(?:mpi_|k_|drv_).*\.h$', include)):
+                    errors.append(f'{relative}: L4 includes a platform implementation header: {include}')
         for include in re.findall(r'^\s*#\s*include\s*"([^"]+)"', text, re.MULTILINE):
+            if relative.parts[0] == 'include':
+                for base in (path.parent, ROOT, ROOT / 'include/firmware/src'):
+                    resolved = (base / include).resolve()
+                    if resolved.is_relative_to(ROOT / 'src'):
+                        errors.append(f'{relative}: lower-level library depends on L4: {include}')
+                        break
             if include.endswith('.hpp'):
                 errors.append(f'{relative}: includes a forbidden C++ header: {include}')
             if include.endswith('.cpp') and not any(
                 (base / include).is_file()
-                for base in (path.parent, ROOT, ROOT / 'include/firmware/app/src')
+                for base in (path.parent, ROOT, ROOT / 'include/firmware/src')
             ):
                 errors.append(f'{relative}: missing C++ dependency: {include}')
         if not has_main:

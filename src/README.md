@@ -1,14 +1,27 @@
-# L4 领域与策略
+# 业务源码
 
-`src/` 只放检测、跟踪、观测器、控制律和领域状态机等算法及策略。
-当前实现为 `detector/`；未来控制模块也放在这里。
+`src/` 全部属于 L4，按功能划分调用、编排与策略。设备初始化、线程、文件系统、
+编码和日志写入的实现放在 `include/firmware/src/`，通过公开接口供 L4 调用。
 
-L4 可以依赖 L3 的公开数据类型或抽象接口。检测器只包含
-`camera/frame_view.cpp`，构建目标只依赖无实现的 `dart_camera_types`；不持有相机、
-不创建设备、不操作帧租约，也不包含 K230/MPP 或 POSIX 运行时实现。
+| 路径 | 职责 |
+|---|---|
+| `dart_entry.cpp` | 唯一业务进程入口，将板级工厂注入启动流程 |
+| `startup/` | 参数解析、服务组装、故障隔离和运行顺序 |
+| `vision/` | 相机采集生命周期、逐帧识别和帧分发 |
+| `recording/` | 录像参数映射、启停决策和采集线程中的租约排空 |
+| `diagnostics/` | 相机错误的业务日志字段和检测 CSV 字段映射 |
+| `detector/` | 灯/装甲板检测与 ROI，只消费帧数据 |
 
-应用入口、具体组件选择和生命周期组装放在 `app/`；进程监督、录像线程和文件
-写入放在 `runtime/`。这些目录可以组合领域对象，L4 不反向依赖它们。
+`startup/` 通过注入的设备工厂调用下层服务，不处理硬件配置和 POSIX 资源。
+`vision/` 决定帧如何交给识别和录像；`recording/` 决定何时启停录像，
+不拥有写线程或编码器；`diagnostics/` 定义业务记录内容，不管理文件缓冲与同步。
+检测器只包含 `camera/frame_view.cpp`，构建目标只依赖 `dart_camera_types`；
+不持有相机、不创建设备、不操作帧租约。
+所有 L4 模块均不包含 K230/MPP 或 POSIX 实现头文件。
 
-本目录的领域库统一在 `src/CMakeLists.txt` 中声明；应用和运行时目标分别在
-`app/CMakeLists.txt`、`runtime/CMakeLists.txt` 中声明。
+`src/CMakeLists.txt` 统一声明领域库与业务应用目标；`dart_detection_checks`
+和 `dart_application_checks` 分别独立编译所属模块，领域库不继承应用的设备或
+运行时依赖。板级、日志、存储和录像目标由 `include/CMakeLists.txt` 声明；
+`runtime/` 中现有 IMU 采样服务本轮保留，launcher 负责进程监督。
+
+应用参数、数据流和退出契约见 [`startup/README.md`](startup/README.md)。

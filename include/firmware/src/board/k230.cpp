@@ -1,0 +1,101 @@
+#ifndef DART_BOARD_K230_CPP
+#define DART_BOARD_K230_CPP
+
+#include <expected>
+#include <memory>
+#include <utility>
+
+#include "camera/k230/camera.cpp"
+#include "logging/logger.cpp"
+#include "runtime/imu/session.cpp"
+#include "storage/directories.cpp"
+#include "system/device_services.cpp"
+#ifdef DART_APP_IMU_K230
+# include "imu/k230/iim42622.cpp"
+#endif
+
+namespace dart::board {
+
+inline std::expected<std::unique_ptr<camera::ICamera>, camera::CameraError>
+    create_camera(const camera::Controls& controls) noexcept {
+    auto created = camera::k230::Camera<4>::create(controls);
+    if (!created)
+        return std::unexpected(created.error());
+    return std::unique_ptr<camera::ICamera>{std::move(created.value())};
+}
+
+template <typename Service>
+inline int with_imu(
+    const platform::ImuOptions& options, logging::Logger& log, Service&& service) noexcept {
+    if (!options.enabled)
+        return service(nullptr);
+#ifdef DART_APP_IMU_K230
+    /* Explicit bus/CS; remaining acquisition defaults are UNVALIDATED.
+     * 1 kHz ODR/polling, +/-16 g, +/-2000 deg/s, zero configured gyro bias. */
+    dart_iim42622_config_t config{};
+    config.bus = options.bus;
+    config.chip_select_pin = options.chip_select;
+    config.bus_hz = 1'000'000;
+    config.timeout_ms = 20;
+    config.output_data_rate = 0x06;
+    imu::k230::Iim42622 device{config};
+    const auto initialized = device.initialize();
+    if (!initialized) {
+        const auto& diagnostic = device.initialization_diagnostic();
+        log.line(
+            "level=ERROR module=imu op=initialize code=%u bus=%d cs=%d "
+            "id_read=%u supported_ids=0x46,0x6f observed_id=0x%02x model=%s action=disable_imu\n",
+            static_cast<unsigned>(initialized.error()), config.bus, config.chip_select_pin,
+            diagnostic.device_id_read, diagnostic.observed_device_id,
+            dart_iim42622_device_name(diagnostic.observed_device_id));
+        return service(nullptr);
+    }
+    const auto& diagnostic = device.initialization_diagnostic();
+    log.line(
+        "level=INFO module=imu op=initialize model=%s device_id=0x%02x result=ok\n",
+        dart_iim42622_device_name(diagnostic.observed_device_id), diagnostic.observed_device_id);
+    log.line(
+        "level=INFO module=imu op=config read=%u intf0=0x%02x intf1=0x%02x "
+        "power=0x%02x gyro=0x%02x accel=0x%02x status=0x%02x gyro_individual=%d,%d,%d\n",
+        diagnostic.registers_read, diagnostic.interface_config0, diagnostic.interface_config1,
+        diagnostic.power_config, diagnostic.gyro_config, diagnostic.accel_config,
+        diagnostic.interrupt_status, diagnostic.individual_gyroscope[0],
+        diagnostic.individual_gyroscope[1], diagnostic.individual_gyroscope[2]);
+    storage::ensure_parent(options.log_path);
+    imu::Session session{device};
+    if (!session.start(options.log_path, 1000, true)) {
+        log.line("level=ERROR module=imu op=start path=%s action=disable_imu\n", options.log_path);
+        return service(nullptr);
+    }
+    log.line(
+        "level=INFO module=imu op=start bus=%d cs=%d bus_hz=%u timeout_ms=%u "
+        "odr=0x%02x accel_range=%u gyro_range=%u gyro_bias_rad_s=0,0,0 "
+        "period_us=1000 initial_seed=stationary_identity parameters=UNVALIDATED "
+        "log_limit_bytes=%llu path=%s\n",
+        config.bus, config.chip_select_pin, config.bus_hz, config.timeout_ms,
+        config.output_data_rate, config.accelerometer_range, config.gyroscope_range,
+        static_cast<unsigned long long>(imu::Session::kDefaultLogLimitBytes), options.log_path);
+    // Consumers must share this session's current()/seed()/reset() methods.
+    const int result = service(&session);
+    session.stop();
+    const auto stats = session.stats();
+    log.line(
+        "level=%s module=imu op=stop samples=%llu read_errors=%llu written=%llu "
+        "dropped=%llu io_errors=%llu log_bytes=%llu log_limit_reached=%d path=%s\n",
+        stats.io_errors > 0 ? "ERROR" : "INFO", static_cast<unsigned long long>(stats.samples),
+        static_cast<unsigned long long>(stats.read_errors),
+        static_cast<unsigned long long>(stats.written),
+        static_cast<unsigned long long>(stats.dropped),
+        static_cast<unsigned long long>(stats.io_errors),
+        static_cast<unsigned long long>(stats.log_bytes), stats.log_limit_reached,
+        options.log_path);
+    return result;
+#else
+    log.line("level=ERROR module=imu op=initialize code=backend_unavailable action=disable_imu\n");
+    return service(nullptr);
+#endif
+}
+
+} // namespace dart::board
+
+#endif // DART_BOARD_K230_CPP

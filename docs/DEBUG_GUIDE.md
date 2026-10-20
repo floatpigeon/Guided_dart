@@ -10,8 +10,8 @@
 
 部署前必须满足：
 
-- 应用目录 `app/` 有自己的入口与在 `app/CMakeLists.txt` 中声明的目标；
-- `bash scripts/build.sh <目标名>` 能生成 ELF；
+- 业务入口位于 `src/dart_entry.cpp`，L4 编排按功能位于 `src/{startup,vision,recording,diagnostics}/`，目标在 `src/CMakeLists.txt` 中声明；
+- `bash .script/build-rtos <目标名>` 能生成 ELF；
 - 交叉构建、链接脚本（SDK `link.lds`）和 SDK 依赖明确；
 - 版本化参数和日志 schema 已写入应用配置；
 - 板端有安全的停止/回收路径（`--seconds` 或 SIGINT/SIGTERM，退出逐 step 留日志）。
@@ -103,7 +103,7 @@ ts_ms level module op code native detail action count msg="..."
 
 ## 7. 录像与取证
 
-当前 v2 的录像**只有灰度取证**：`runtime/recordor` 把帧拷成紧凑 Y8 后写
+当前 v2 的录像**只有灰度取证**：`include/firmware/src/recorder/` 把帧拷成紧凑 Y8 后写
 `records/rec_NNNN/img/frame_XXXXXXXX.pgm`（或按阈值打包的 `.pbm`），并在
 `records/rec_NNNN/logs/frames.csv` 每帧一行记录放行决定；`dart_app` 另外写
 `records/detection.csv`（每帧的识别结果与扫描窗口）。硬件 H.264/VENC 在 v2 尚不存在。

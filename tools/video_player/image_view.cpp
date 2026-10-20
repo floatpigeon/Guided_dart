@@ -14,7 +14,7 @@
 #include <optional>
 #include <utility>
 
-#include "recording.cpp"
+#include "recording_types.cpp"
 
 namespace dart::tools::video_player {
 
@@ -25,7 +25,8 @@ public:
         std::optional<QRectF> window;
     };
 
-    explicit ImageView(QWidget* parent = nullptr) : QWidget(parent) {
+    explicit ImageView(QWidget* parent = nullptr)
+        : QWidget(parent) {
         setMinimumSize(320, 240);
         setFocusPolicy(Qt::StrongFocus);
     }
@@ -54,8 +55,8 @@ protected:
             const auto& box = *overlay_.window;
             painter.setPen(QPen(Qt::cyan, 2));
             // win_x1/win_y1 are exclusive pixel boundaries.
-            painter.drawRect(QRectF(box.x() * sx, box.y() * sy,
-                                    box.width() * sx, box.height() * sy));
+            painter.drawRect(
+                QRectF(box.x() * sx, box.y() * sy, box.width() * sx, box.height() * sy));
         }
         if (overlay_.center) {
             const auto& center = *overlay_.center;
@@ -70,10 +71,12 @@ protected:
         const QRect target = image_rect();
         if (image_.isNull() || !target.contains(event->pos()))
             return;
-        const int x = std::clamp((event->pos().x() - target.x()) * image_.width()
-                                    / target.width(), 0, image_.width() - 1);
-        const int y = std::clamp((event->pos().y() - target.y()) * image_.height()
-                                    / target.height(), 0, image_.height() - 1);
+        const int x = std::clamp(
+            (event->pos().x() - target.x()) * image_.width() / target.width(), 0,
+            image_.width() - 1);
+        const int y = std::clamp(
+            (event->pos().y() - target.y()) * image_.height() / target.height(), 0,
+            image_.height() - 1);
         if (clicked)
             clicked(x, y);
         setFocus();
@@ -84,8 +87,8 @@ private:
         if (image_.isNull())
             return {};
         const QSize scaled = image_.size().scaled(size(), Qt::KeepAspectRatio);
-        return QRect(QPoint((width() - scaled.width()) / 2, (height() - scaled.height()) / 2),
-                     scaled);
+        return QRect(
+            QPoint((width() - scaled.width()) / 2, (height() - scaled.height()) / 2), scaled);
     }
     QImage image_;
     Overlay overlay_;

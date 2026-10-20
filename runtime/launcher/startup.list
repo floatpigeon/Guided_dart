@@ -29,66 +29,65 @@
 # 5 个实例几乎同时抢 VB/VICAP，只有 9 次写出日志，其余静默死掉，活下来的那个把
 # VB 占住，后面每个都撞 FATAL: vb_set_config。
 # v2 的相机 ACL 在 create() 里自建并独占 dart_media（全局 VB + VICAP/VB 池），
-# 因此"识别"与"录像"必须在同一个 dart_app 进程内完成（app/application.cpp 组装）；
+# 因此"识别"与"录像"必须在同一个 dart_app 进程内完成（src/startup/services.cpp 组装）；
 # 拆成两个 ELF 就需要先设计帧共享通道，当前没有。
 # 一次上电只放一条，换配置就改这一行。
 # ----------------------------------------------------------------------------
 
 # ---- 本轮启用项：识别 + 录像（单进程独占 VICAP）----
-# 日志:  /sdcard/app/logs/dart_app.log（状态与耗时两行共用一次 fsync；launcher 另写
-#        /sdcard/app/logs/launcher.log 与 dart_app.console.log）
-# 录像:  /sdcard/app/records/rec_NNNN/img/frame_XXXXXXXX.pgm（灰度取证图，目标 30 FPS）
-#        /sdcard/app/records/rec_0001/logs/frames.csv（每帧一行的放行记录）
-# 识别:  /sdcard/app/records/detection.csv（每帧一行：目标/质心/扫描窗口/候选数）
+# 日志:  /data/app/logs/dart_app.log（状态与耗时两行共用一次 fsync；launcher 另写
+#        /data/app/logs/launcher.log 与 dart_app.console.log）
+# 录像:  /data/app/records/rec_NNNN/img/b0000001/p0000001/00000001.png（逐帧 PNG，目标 60 FPS）
+#        /data/app/records/rec_NNNN/logs/frames.csv（每帧一行的放行记录）
+# 识别:  /data/app/records/detection.csv（每帧一行：目标/质心/扫描窗口/候选数）
+# 程序在 /sdcard/app，不加载 ISP 配置；录像和日志写入 /data 分区。
 #
-# 参数含义（全部在 app/application.cpp 的 usage 里有；默认值一律 UNVALIDATED）：
-#   --acq 1280x720 --fps 90    传感器模式。v2 ACL 精确匹配、无静默回退，模式写错
-#                              会在 camera_create 阶段报 E_INVALID/UNSUPPORTED 并退出。
-#                              v1 在该板 gc2093 上验证过的档位是
-#                              1920x1080@30 / 1920x1080@60 / 1280x960@90 / 1280x720@90，
-#                              本配置请求 720p90；输出保持 1280x720，不缩放。
-#   --csi 2                    本项目历史板端工程的 GC2093 接在 CSI2；显式指定，
-#                              避免落到 dart_app 的通用默认值 CSI0。
-#   --exp 250                  固定曝光微秒（发光目标往小取，避免过曝扩散影响质心）。
-#                              0 = 保持未定，固定模式下会阻塞取帧；自动曝光用 --ae。
-#   --record on --rec-fps 30   目标每秒 30 张 PGM，按接收时间采样，与采集帧率独立；
+# 相机模式、尺寸、帧率与 CSI 由 K230 实现和固件板级配置管理，上层只消费图像。
+# 参数含义（src/startup/argument_parser.cpp 的 usage；曝光/阈值需要板端验证）：
+#   --exp 900                  本清单固定曝光 900 行，帧长 911 行，为 60 FPS 录像留余量。
+#                              应用省略参数时仍默认 2560 行，帧长 2571 行，
+#                              通过现有传感器接口写入，无需标定像素时钟或修改固件。
+#                              --exp 0 保留传感器初始曝光；RAW 直采不支持 --ae。
+#   --record on --rec-fps 60   目标每秒 60 张独立 PNG，按接收时间采样，与采集帧率独立；
 #                              写盘在录像线程，输入不足或写盘忙时实际帧率会降低，
 #                              队列满即丢并计数（rec_busy），不阻塞采集。
-#   --rec-keep 2             新建录像前只保留最近一轮，生成后最多两轮；
-#                              旧轮次会从板端删除，需长期保存的录像先复制到主机。
+#   --rec-keep 0             每次启动新建 rec_NNNN，保留复位前的录像目录。
+#   本轮 PNG 总量最多 500 MB（500,000,000 字节，含 PNG 头）；下一张放不下时停止录像，
+#   每 32 张分组，不创建续录轮次。识别、IMU 继续运行，直到复位或停止信号。
+#   /data 分区总占用上限为 2 GB（2,000,000,000 字节），计入旧录像、日志及分配开销；
+#   在总量上限及物理剩余空间内均预留 64 MiB，不足时停录，保留已有录像。
 #   --det-csv .../detection.csv  识别结果 CSV；= off 关闭。板端复盘识别必须留它。
-#   --seconds 90               每轮录 90 秒后干净退出；launcher 再启动新轮次：
+#   不设 --seconds，不自动重启；退出时：
 #                              录像线程收尾取净 → 排空租约 → camera.stop →
 #                              销毁相机 → 摘要行 "step=summary"。一轮上电即可同时
 #                              回答：有没有拉起来 / 采集通不通 / 识别有没有目标 /
 #                              录像落没落盘 / 收尾干不干净。
-/sdcard/app/dart_app --acq 1280x720 --fps 90 --csi 2 --exp 250 --vision on --record on --rec-fps 30 --rec-keep 2 --rec-format pgm --rec-dir /sdcard/app/records --det-csv /sdcard/app/records/detection.csv --seconds 90 &!
+/sdcard/app/dart_app --exp 900 --vision on --record on --rec-fps 60 --rec-keep 0 --rec-format png --raw-layout packed10-lsb --rec-dir /data/app/records --det-csv /data/app/records/detection.csv --log /data/app/logs/dart_app.log --imu on --imu-bus 1 --imu-cs 14 --imu-log /data/app/logs/imu.log &
+
+# 新板 IIM-42622：SPI1，CS IO14。相机失败只停用图像链路，IMU 持续至时限/停止信号。
+# 日志: /data/app/logs/imu.log（原始样本与积分状态）；不依赖 UART 文件传输。
 
 # ---- 先手动验证，再交给 launcher（强建议）----
-# 上电前先在 msh 里手跑一条，确认模式/曝光/路径都对，再把它放进自启清单：
+# 上电前先在 msh 里手跑一条，确认曝光/路径都对，再把它放进自启清单：
 #   msh> /sdcard/app/launcher -t                      # 只校验清单，不启动任何进程
-#   msh> /sdcard/app/dart_app --csi 2 --seconds 10 --record off   # 只验证采集+识别
-#   msh> /sdcard/app/dart_app --csi 2 --seconds 10   # 再验证录像落盘
+#   msh> /sdcard/app/dart_app --seconds 10 --record off   # 只验证采集+识别
+#   msh> /sdcard/app/dart_app --seconds 10   # 再验证录像落盘
 # 手工验证时不要和 launcher 同时跑：两者都会独占 VICAP。
 
 # ---- 换档示例（一次只改一个变量）----
 # 只识别不录像（不拷贝、不建录像线程；release 由采集线程直接做）:
-# /sdcard/app/dart_app --exp 250 --vision on --record off --seconds 90 &
+# /sdcard/app/dart_app --exp 2560 --vision on --record off --seconds 90 &
 
 # 只录像不识别（量采集+写盘开销的基线）:
-# /sdcard/app/dart_app --exp 250 --vision off --record on --rec-fps 30 --seconds 90 &
+# /sdcard/app/dart_app --exp 2560 --vision off --record on --rec-fps 30 --seconds 90 &
 
-# 二值化取证（不写 PGM，写按阈值打包的 PBM，体积小、直接就是识别器看到的图）:
-# /sdcard/app/dart_app --exp 250 --record on --rec-format pbm --threshold 128 --seconds 90 &
+# 二值化取证（逐帧 PNG 无损压缩，保存识别器看到的二值图）:
+# /sdcard/app/dart_app --exp 2560 --record on --rec-format png --threshold 128 --seconds 90 &
 
-# 自动曝光对照（--ae 与 --exp 互斥）:
-# /sdcard/app/dart_app --ae --record off --seconds 60 &
-
-# 高帧率档（带宽余量最大，v1 该传感器上验证过的档位）:
-# /sdcard/app/dart_app --acq 1280x720 --fps 90 --exp 250 --record on --rec-fps 4 --seconds 90 &
+# 本机已实测 MCM RAW10 为 packed10-lsb，640 像素行占 800 字节。
 
 # 长跑稳定性（30 分钟，无 --seconds 时只能靠 SIGINT/SIGTERM 或 --max-acquire-errors 退出）:
-# /sdcard/app/dart_app --acq 1920x1080 --fps 30 --exp 250 --record on --rec-fps 4 --seconds 1800 &
+# /sdcard/app/dart_app --exp 2560 --record on --rec-fps 4 --seconds 1800 &
 
 # ---- 调试工具（手动跑，别自启）----
 # launcher 自身：

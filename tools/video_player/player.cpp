@@ -22,6 +22,7 @@
 #include <memory>
 #include <utility>
 
+#include "image_reader.cpp"
 #include "image_view.cpp"
 #include "recording.cpp"
 
@@ -29,7 +30,8 @@ namespace dart::tools::video_player {
 
 class Player final : public QMainWindow {
 public:
-    explicit Player(Recording recording) : recording_(std::move(recording)) {
+    explicit Player(Recording recording)
+        : recording_(std::move(recording)) {
         setWindowTitle(QStringLiteral("Dart recording player"));
         resize(1200, 760);
         auto* central = new QWidget(this);
@@ -83,7 +85,10 @@ private:
             return;
         const auto& frame = recording_.frames().at(static_cast<std::size_t>(index));
         details_ = QStringLiteral("Frame %1/%2\nimage_index: %3\nfile: %4\n")
-            .arg(index + 1).arg(recording_.frames().size()).arg(frame.image_index).arg(frame.path);
+                       .arg(index + 1)
+                       .arg(recording_.frames().size())
+                       .arg(frame.image_index)
+                       .arg(frame.path);
         if (!recording_.notes().isEmpty())
             details_ += '\n' + recording_.notes().join('\n') + '\n';
         if (!frame.notes.isEmpty())
@@ -91,22 +96,24 @@ private:
         if (frame.event)
             details_ += QStringLiteral("\nRECORDER\n") + frame.event->text();
         if (frame.detection)
-            details_ += QStringLiteral("\nDETECTION (exact frame identity)\n")
-                + frame.detection->text();
+            details_ +=
+                QStringLiteral("\nDETECTION (exact frame identity)\n") + frame.detection->text();
 
-        QImageReader reader(frame.path);
-        const QImage image = reader.read();
+        QString image_error;
+        const QImage image = read_frame_image(frame, image_error);
         if (image.isNull()) {
             view_->set_frame({}); // Never retain the previous image under the next frame's log.
-            details_ += QStringLiteral("\nIMAGE ERROR: ") + reader.errorString();
+            details_ += QStringLiteral("\nIMAGE ERROR: ") + image_error;
         } else {
             view_->set_frame(image, ImageView::overlay_for(frame, image.size()));
             details_ += QStringLiteral("\nsize: %1 x %2\nGreen: valid target; cyan: scan window.")
-                .arg(image.width()).arg(image.height());
+                            .arg(image.width())
+                            .arg(image.height());
         }
         info_->setPlainText(details_);
         statusBar()->showMessage(QStringLiteral("Frame %1/%2 — Left/Right, Home/End; click pixel")
-            .arg(index + 1).arg(recording_.frames().size()));
+                                     .arg(index + 1)
+                                     .arg(recording_.frames().size()));
     }
 
     Recording recording_;
@@ -125,20 +132,22 @@ inline int run_application(int argc, char** argv) {
     parser.addHelpOption();
     parser.addOption(QCommandLineOption({"f", "pbm"}, "Show only frame_*.pbm."));
     parser.addOption(QCommandLineOption({"r", "pgm"}, "Show only frame_*.pgm."));
-    parser.addOption(QCommandLineOption(
-        "check", "Check metadata associations without opening GUI."));
+    parser.addOption(QCommandLineOption("png", "Show only independent PNG frames."));
+    parser.addOption(
+        QCommandLineOption("check", "Check metadata associations without opening GUI."));
     parser.addPositionalArgument("session", "A rec_NNNN session or its img directory.");
-    parser.addPositionalArgument("frames.csv", "Recorder CSV (default: session/logs/frames.csv).",
-                                 "[frames.csv]");
-    parser.addPositionalArgument("detection.csv", "Detection CSV (default: records/detection.csv).",
-                                 "[detection.csv]");
+    parser.addPositionalArgument(
+        "frames.csv", "Recorder CSV (default: session/logs/frames.csv).", "[frames.csv]");
+    parser.addPositionalArgument(
+        "detection.csv", "Detection CSV (default: records/detection.csv).", "[detection.csv]");
     QStringList args;
     for (int i = 0; i < argc; ++i)
         args.push_back(QString::fromLocal8Bit(argv[i]));
     const bool parsed = parser.parse(args);
     const auto positional = parser.positionalArguments();
-    const bool valid = !positional.isEmpty() && positional.size() <= 3
-        && !(parser.isSet("f") && parser.isSet("r"));
+    const bool valid =
+        !positional.isEmpty() && positional.size() <= 3
+        && (int(parser.isSet("f")) + int(parser.isSet("r")) + int(parser.isSet("png")) <= 1);
     const bool wants_help = parser.isSet("help") || parser.isSet("help-all");
     if (!parsed || wants_help || !valid) {
         QCoreApplication app(argc, argv); // helpText needs an application, but no GUI plugin.
@@ -157,10 +166,10 @@ inline int run_application(int argc, char** argv) {
     session.cdUp();
     QDir records(session);
     records.cdUp();
-    const QString frames_csv = positional.size() > 1 ? positional.at(1)
-        : session.filePath("logs/frames.csv");
-    const QString detection_csv = positional.size() > 2 ? positional.at(2)
-        : records.filePath("detection.csv");
+    const QString frames_csv =
+        positional.size() > 1 ? positional.at(1) : session.filePath("logs/frames.csv");
+    const QString detection_csv =
+        positional.size() > 2 ? positional.at(2) : records.filePath("detection.csv");
     for (int i = 1; i < positional.size(); ++i) {
         if (!QFileInfo::exists(positional.at(i))) {
             QTextStream(stderr) << positional.at(i) << ": explicit CSV does not exist\n";
@@ -169,7 +178,10 @@ inline int run_application(int argc, char** argv) {
     }
     Recording recording;
     QString error;
-    const QString extension = parser.isSet("f") ? "pbm" : parser.isSet("r") ? "pgm" : "";
+    const QString extension = parser.isSet("f")   ? "pbm"
+                            : parser.isSet("r")   ? "pgm"
+                            : parser.isSet("png") ? "png"
+                                                  : "";
     if (!recording.load(images.absolutePath(), frames_csv, detection_csv, extension, error)) {
         QTextStream(stderr) << error << '\n';
         return 1;

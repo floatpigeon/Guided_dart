@@ -1,5 +1,12 @@
 build/
 build-cross/
+/build-board-validation-cross/
+/build-board-validation-host/
+/build-board-validation-player/
+
+# Python 工具的本地缓存
+__pycache__/
+*.py[cod]
 
 third_party/
 

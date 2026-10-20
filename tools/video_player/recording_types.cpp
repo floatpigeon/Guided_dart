@@ -1,0 +1,51 @@
+#ifndef DART_TOOLS_VIDEO_PLAYER_RECORDING_TYPES_CPP
+#define DART_TOOLS_VIDEO_PLAYER_RECORDING_TYPES_CPP
+
+#include <QFileInfo>
+#include <QMap>
+#include <QString>
+#include <QStringList>
+#include <QtGlobal>
+
+#include <optional>
+
+namespace dart::tools::video_player {
+
+struct CsvRow {
+    QMap<QString, QString> values;
+    QString path;
+    QString raw;
+    int line = 0;
+
+    QString value(const QString& name) const { return values.value(name); }
+    QString location() const { return QStringLiteral("%1:%2").arg(path).arg(line); }
+    QString text() const {
+        QString result = location() + '\n' + raw + '\n';
+        for (auto it = values.cbegin(); it != values.cend(); ++it)
+            result += QStringLiteral("%1: %2\n").arg(it.key(), it.value());
+        return result;
+    }
+};
+
+// image_index is an output counter, never a CSV line or source sequence.
+struct Frame {
+    quint64 image_index = 0;
+    QString path;
+    QString relative_name;
+    qint64 file_offset = 0;
+    qint64 file_bytes = 0; // Nonzero for one complete image within a PGM/PBM stream.
+    std::optional<CsvRow> event;
+    std::optional<CsvRow> detection;
+    QStringList notes;
+
+    QString key() const {
+        const QString name = relative_name.isEmpty()
+                               ? QStringLiteral("img/") + QFileInfo(path).fileName()
+                               : relative_name;
+        return file_bytes == 0 ? name : name + '@' + QString::number(file_offset);
+    }
+};
+
+} // namespace dart::tools::video_player
+
+#endif // DART_TOOLS_VIDEO_PLAYER_RECORDING_TYPES_CPP

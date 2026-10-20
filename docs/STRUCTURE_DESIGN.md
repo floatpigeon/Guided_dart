@@ -62,34 +62,46 @@ L1  BSP/HAL/MPP（厂商 C）
 [librmcs 的设备扫描器](https://github.com/Alliance-Algorithm/librmcs/blob/47313cea064750c8fc42c822083ebe9df7179dbd/host/src/transport/usb/device_scanner.hpp)
 将扫描结果和诊断类型收在实现内部的组织方式。这里借鉴职责边界，不引入其框架依赖。
 
-实际布局（2026-10 更新）：`src/` 严格保持为 L4；应用组装与具体运行时实现
-放在独立目录，各目录的 `CMakeLists.txt` 分别声明本目录目标。
+实际布局（2026-10 更新）：`src/` 全部是 L4 调用与策略层，二级目录按功能划分。
+下层接口与实现统一位于 `include/firmware/src/`；库目标由 `include/CMakeLists.txt`
+声明，业务目标由 `src/CMakeLists.txt` 声明。下层库不得反向包含 `src/`。
 
 ```
-src/                        L4 领域与策略，只依赖 L3 公开数据或抽象接口
-  detector/                 连通域、灯、装甲板与 ROI（dart_detection，INTERFACE + 逐文件检查）
-  control/                  目标：C++ 观测器、状态机、外环/内环和分配
-app/                        应用组合根，可以选择具体设备和运行时实现
-  dart_entry.cpp            业务进程入口（dart_app）
-  application.cpp           参数解析、采集流程与启动器退出标记
-  capture_pipeline.cpp      组件生命周期、逐帧处理与退出
-  README.md                 应用参数、运行流水线和退出契约
-runtime/                    具体运行时服务与进程管理，L4 不依赖本目录
-  recordor/                 录像线程、PGM/PBM/CSV 文件写入（dart_recording）
-  launcher/                 开机自启器（平台无关 C11）+ startup.list 清单母版
-include/                    L3 公开类型/设备抽象与 L2/C 实现（camera/spi/imu）
+src/                        L4 调用、编排与策略
+  dart_entry.cpp            唯一入口，将板级工厂注入启动流程
+  startup/                  参数、服务组装、故障隔离与运行顺序
+  vision/                   采集生命周期、识别与帧分发
+  recording/                录像配置、启停决策与租约排空
+  diagnostics/              相机错误字段与检测 CSV 字段映射
+  detector/                 连通域、灯、装甲板与 ROI
+include/firmware/src/    下层公开接口与实现库
+  camera/                   相机帧类型、接口与 ACL/C 数据面
+  imu/、spi/                IMU 抽象、估计器与硬件适配
+  board/                    具体设备工厂和板级初始化
+  system/                   时钟、停止信号与 launcher 退出标记
+  logging/、storage/        日志、通用 CSV 写入与目录操作
+  recorder/                 录像服务：图像队列、相机租约与生命周期
+    async/                  元数据有界队列与写线程
+    encoding/               内存 PNG 编码
+    storage/                轮次保留、空间预算、图片与事件文件
+runtime/
+  launcher/                 平台无关 C11 自启器 + startup.list 母版
+  imu/                      现有独立采样服务（本轮由 IMU 诊断任务维护，暂不迁移）
 cmake/                      交叉工具链配置（链接脚本取 SDK 的 libs/mk/link.lds）
 .script/                    构建、部署、清理与回归检查
 docs/                       设计、标定、调试和验收契约
 ```
 
-`src/` 不包含 K230 工厂、POSIX 线程/文件操作、main 或进程管理。检测器只包含
-`camera/frame_view.cpp`，通过 INTERFACE 目标 `dart_camera_types` 获取帧数据类型，
-不链接 `dart_camera_acl` 或 K230 后端。设备实现由 `app/` 明确选择。
+L4 通过公开接口调用下层实现，不包含 SDK 或 POSIX 实现头文件。
+`startup/` 组织组件的运行顺序；`vision/` 决定帧的流向；`recording/` 决定录像何时启停；
+`diagnostics/` 定义业务字段。线程、缓冲、文件同步和设备寄存器不属于这些调用模块。
+参数帮助文本和参数错误的标准输出属于 CLI 交互，保留在参数解析模块。
 
-应用组合根负责相机、IMU、识别、录像、控制等组件的组装和生命周期，具体实现仍在
-各自模块；IMU 采样和控制任务按各自频率运行，不随相机逐帧循环调度。它不新增
-领域分层；launcher 负责进程监督，application 负责进程内部的组件编排。
+检测器只包含 `camera/frame_view.cpp`，通过 INTERFACE 目标 `dart_camera_types`
+获取帧数据类型，不链接相机 ACL 或 K230 后端。入口只连接 `board/` 提供的工厂与
+`startup/` 调用流程，具体初始化由下层板级适配器完成。
+IMU 采样和后续控制任务按各自频率运行，不随相机逐帧循环调度。
+launcher 负责进程监督，L4 启动流程负责进程内部的组件编排。
 
 启动链路的完整设计（清单语义、所有权、日志布局、v1 教训）见
 [`LAUNCHER_DESIGN.md`](LAUNCHER_DESIGN.md)。
@@ -136,8 +148,9 @@ VICAP/传感器（ACL）
 
 ## 7. 禁止事项
 
-- 不把应用入口、组件工厂、线程/文件实现或进程管理放进 L4 的 `src/`；不把具体
-  相机实现作为领域库的依赖。也不要把 v1 的 `self_guiding_dart` 整体搬回来。
+- 不在 `src/` 中实现设备工厂、线程、文件系统或 SDK 适配；L4 按功能调用
+  `include/` 中的下层库，不再建立包揽所有职责的 `application/` 目录。
+  不把具体相机实现作为检测算法的依赖，也不要把 v1 的 `self_guiding_dart` 整体搬回来。
 - 不要出现第二个持有 VICAP/VB 的进程：识别与录像必须在 `dart_app` 这一个 ELF 内
   串联（v1 实测多实例抢资源必死），清单里也不能放第二条 payload。
 - 不要把外部仓库（包括 v1 或 RMCS）当作本仓库的依赖；只提炼设计原则并在本仓上下文重写。
