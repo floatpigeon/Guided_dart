@@ -76,7 +76,8 @@ dart_app [选项]
   --imu on|off     IMU 独立采样与日志（默认 off）
   --imu-bus N      SPI 总线 0..2，启用 IMU 时必填
   --imu-cs N       片选引脚 0..63，-1 使用 HAL 默认，启用 IMU 时必填
-  --imu-log PATH   原始/积分日志（默认 /data/app/logs/imu.log）
+  --imu-log PATH   IMU 日志基名，每次启动加编号（默认 /data/app/logs/imu.log）
+  --imu-ignore-id on|off  跳过 WHO_AM_I 值校验并记录原始寄存器（诊断用，默认 off）
   --status-ms N    状态行间隔（默认 1000）
   --acquire-ms N   单次取帧超时（默认 200）
   --max-acquire-errors N  连续取帧错误上限，超过即退出（默认 8）
@@ -95,6 +96,8 @@ SIGINT/SIGTERM，独立 IMU 线程继续采样、积分、写日志；不反复�
 `log_camera_error()` 只写文件日志，写入失败时保持静默，CLI 参数错误仍返回错误码。
 
 新板 IMU 接线为 SPI1、CS IO14，测试时追加 `--imu on --imu-bus 1 --imu-cs 14`。
+如需诊断 ID 异常，可再追加 `--imu-ignore-id on`；复位前后实际 ID 和 14 字节原始
+快照会写入应用日志，即使初始化失败也保留。配置读回、有效样本检查和传输错误处理继续生效。
 新版固件已接入 SC038HGS，后端通过 MCM 直采 RAW10 并直接转为二值 Y8，详见
 [`camera/README.md`](../../include/firmware/src/camera/README.md)。应用默认通过接口设置
 2560 行曝光，后端同步设置 VTS=2571；`--exp` 单位为行，0 保留传感器初始曝光。
@@ -106,7 +109,7 @@ SIGINT/SIGTERM，独立 IMU 线程继续采样、积分、写日志；不反复�
 
 ```
 /data/app/logs/dart_app.log                        结构化日志（状态与耗时两行共用一次 fsync，写完关闭文件）
-/data/app/logs/imu.log                             启用 IMU 后的原始样本、积分快照和重积分事件
+/data/app/logs/imu_NNNNNN.log                      每轮独立的 IMU 原始样本、积分快照和重积分事件
 /data/app/records/rec_NNNN/img/b0000001/p0000001/00000001.png  逐帧二值 PNG（每组 32 张）
 /data/app/records/rec_NNNN/logs/frames.csv           每帧一行的放行记录（Recorder 写）
 /data/app/records/detection.csv                    每帧一行的识别结果（本程序写）
@@ -120,7 +123,8 @@ SIGINT/SIGTERM，独立 IMU 线程继续采样、积分、写日志；不反复�
 （窗口右下边界是**开区间坐标**，与 `ScanMetadata::search_window` 一致。）
 
 IMU 需要显式指定硬件接线，例如在确认 SPI0 和 HAL 默认片选适用后追加
-`--imu on --imu-bus 0 --imu-cs -1`；`--imu-log` 可改日志路径。默认关闭，
+`--imu on --imu-bus 0 --imu-cs -1`；`--imu-log` 可改日志基名，每次启动创建新编号文件，
+例如 `imu_000001.log`、`imu_000002.log`；IMU start/stop 状态行给出实际路径。默认关闭，
 当前启动清单按新板配置 SPI1 / CS IO14。采样为独立线程，启动时等待静止样本建立单位四元数参考系；
 后续重新积分复用同一 Session 的 `seed()` / `reset()`，`current()` 返回日志里的
 同一份 Estimate。原始计数、SI 数据、积分状态、质量位及 generation 都写入日志，

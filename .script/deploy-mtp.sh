@@ -22,23 +22,15 @@ done
 case "${ONLY}" in ''|launcher|dart_app|list) ;; *) echo '无效的 --only 目标' >&2; exit 2 ;; esac
 case "${DEST}" in gphoto2://*|mtp://*) ;; *) echo '需要 gphoto2:// 或 mtp:// 存储 URI' >&2; exit 2 ;; esac
 DEST="${DEST%/}"
-if [[ "${DEST##*/}" == app ]]; then
-    STORE="${DEST%/app}"
-    APP="${DEST}"
-else
-    STORE="${DEST}"
-    APP="${DEST}/app"
+# 与统一入口共用分区和应用目录解析；直接调用也会预检。
+BOARD_IP=''
+SDCARD="${DEST}"
+rtos_resolve_transport
+APP="${RTOS_DIR}"
+if [[ -z "${ONLY}" ]]; then
+    rtos_resolve_data_transport
 fi
-
-die() { printf 'deploy-mtp: %s\n' "$*" >&2; exit 1; }
-command -v gio >/dev/null || die '找不到 gio（Ubuntu 由 libglib2.0-bin 提供）'
 command -v sha256sum >/dev/null || die '找不到 sha256sum'
-if ! gio info "${STORE}/revision.txt" >/dev/null 2>&1; then
-    gio info "${APP}/launcher" >/dev/null 2>&1 &&
-        gio info "${APP}/startup_final.list" >/dev/null 2>&1 ||
-        die '既没有 revision.txt，也没有已部署的 app/launcher 与 startup_final.list，无法确认目标存储'
-    printf '根目录没有 revision.txt；已通过现有 app/launcher 和 startup_final.list 确认目标。\n'
-fi
 
 NAMES=()
 SOURCES=()
@@ -73,7 +65,7 @@ cleanup() {
     for uri in "${STAGED[@]}"; do gio remove "${uri}" >/dev/null 2>&1 || true; done
 }
 trap cleanup EXIT
-printf '目标：%s（板端 /sdcard/app）\n旧文件备份：%s\n' "${APP}" "${BACKUP_DIR}"
+printf '目标：%s（板端 %s）\n旧文件备份：%s\n' "${APP}" "${BOARD_DIR}" "${BACKUP_DIR}"
 
 # 所有旧文件先备份，所有新文件先上传并校验；任何失败都在替换前停止。
 for i in "${!NAMES[@]}"; do
@@ -122,9 +114,10 @@ for i in "${!NAMES[@]}"; do
 done
 
 if [[ -z "${ONLY}" ]]; then
-    ensure_dir "${APP}/logs"
-    ensure_dir "${APP}/records"
+    ensure_dir "${RTOS_DATA_DIR}"
+    ensure_dir "${RTOS_DATA_DIR}/logs"
+    ensure_dir "${RTOS_DATA_DIR}/records"
 fi
 printf '\n部署完成；日志和录像已保留。旧文件备份：%s\n' "${BACKUP_DIR}"
-printf '板端验证：/sdcard/app/launcher -t\n'
+printf '板端验证：%s/launcher -t\n' "${BOARD_DIR}"
 printf '注意：写入不会重启当前进程；dart_app 在启动器下次拉起时加载，startup_final.list 需重启启动器或板子后加载。\n'

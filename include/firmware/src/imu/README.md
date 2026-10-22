@@ -8,10 +8,10 @@
 | `sample.cpp` | L3 数据 | 原始计数、采样值、单位和时间戳 |
 | `interface.cpp` | L3 抽象 | `IImu` 采样源接口 |
 | `estimator.cpp` | 计算 | `Estimator`、嵌套的 `Config` / `Estimate` / `SeedResult` / `QualityEvent` 及无分配估计逻辑 |
-| `k230/iim42622.cpp` | L2 适配器 | `k230::Iim42622`，唯一包含 `spi/iim42622.h` 的 C++ 类 |
+| `k230/iim42652.cpp` | L2 适配器 | `k230::Iim42652`，唯一包含 `spi/iim42652.h` 的 C++ 类 |
 
-`Iim42622` 为历史接口名，底层按 ID 支持 ICM-42622-P 和 IIM-42652；实际型号由
-初始化日志记录。新板重新连接后读到 `0x6f`，与 IIM-42652 一致。
+`Iim42652` 对应 IIM-42652，底层只接受 WHO_AM_I `0x6f`，实际型号由初始化日志记录。
+初始化会等待六轴有效原始数据，超时返回 `kReadyTimeout`；失败时仍可读取完整阶段诊断。
 
 `IImu` 只是采样源：`read_sample()` 返回原始 ADC 计数、SI 值和一个单调时间戳。
 加速度是比力（m/s²），角速度是 rad/s，均在传感器/机体坐标下。寄存器配置和
@@ -43,9 +43,9 @@
 
 ```bash
 cmake --preset host    # 主机编译所有 IMU 类检查目标，供 clangd 使用
-cmake --preset cross   # DART_IMU_K230=ON：dart_imu + dart_imu_k230（链接 dart_iim42622）
+cmake --preset cross   # DART_IMU_K230=ON：dart_imu + dart_imu_k230（链接 dart_iim42652）
 ```
 
 `DART_IMU_K230` 在 `include/CMakeLists.txt` 的 spi 一节声明，因此那份文件里 spi 一节
-必须排在 imu 一节之前（适配器链接 `dart_iim42622`）。交叉构建下两个 C++ 目标都带
+必须排在 imu 一节之前（适配器链接 `dart_iim42652`）。交叉构建下两个 C++ 目标都带
 `-fno-exceptions -fno-rtti`。

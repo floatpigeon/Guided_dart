@@ -28,7 +28,10 @@ bash .script/player --check records/rec_0001
 
 `imu_log_to_bag.py` 读取板端 `runtime/imu/Session` 写出的 v1 CSV 格式 `.log`，
 默认生成带消息定义的 MCAP bag，便于 Foxglove 直接打开和 ROS 2 回放。
-先把板端 `/sdcard/app/logs/imu.log` 复制到主机。以下命令在仓库根目录执行：
+先把板端 `/data/app/logs/imu_NNNNNN.log` 中需要的一轮复制到主机，例如
+将 `imu_000001.log` 保存为 `records/imu.log`。IMU start/stop 状态行记录实际文件名；
+当前正在写入的文件可能被板端共享锁阻止读取，可在停止或下一次上电后读取上一轮。
+以下命令在仓库根目录执行：
 
 ```bash
 # 本机可用的完整 bag 环境为 Rolling；bash 用户用 setup.bash。
@@ -60,7 +63,8 @@ ros2 bag info records/imu_bag
 当前 `integrated=0` 时位置保持不变，从该样本建立下一个区间的基点。
 原始时间戳只用于这个位置估算，不决定 bag 的事件顺序。
 
-日志追加的多轮运行会按出现顺序编号为 session 1、2……；多个输入文件也按命令顺序编号。
+新日志每个文件对应一轮启动；多个输入文件按命令顺序编号为 session 1、2……。
+旧版追加日志中的多轮运行仍按出现顺序编号。
 可限定一个批次：
 
 ```bash

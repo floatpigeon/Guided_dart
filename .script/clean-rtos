@@ -8,13 +8,13 @@
 #   clean-rtos launcher     只删 /sdcard/app/launcher
 #   clean-rtos dart_app     只删 /sdcard/app/dart_app
 #   clean-rtos list         只删 /sdcard/app/startup_final.list
-#   clean-rtos logs         只清 /sdcard/app/logs/*（logs 目录保留）
-#   clean-rtos records      只清 /sdcard/app/records/*（records 目录保留）
+#   clean-rtos logs         清除 /data/app 与 /sdcard/app 的日志（保留 PID/完成标记）
+#   clean-rtos records      清除 /data/app 与 /sdcard/app 的录像（含历史归档）
 #   clean-rtos examples     删固件自带的 examples/（**慎用**：删了只能重烧固件）
 #   clean-rtos -h           本帮助
 #
-# 板子地址走环境变量: BOARD_IP（ssh/scp）或 SDCARD（读卡器 / MTP URI），
-# 可选 BOARD_USER（默认 root）、BOARD_DIR（默认 /sdcard/app）。
+# 默认访问 USB 板子；BOARD_IP 选择 SSH，SDCARD 选择程序分区（读卡器 / MTP URI）。
+# DATA_SDCARD 选择数据分区；BOARD_DIR / BOARD_DATA_DIR 默认 /sdcard/app / /data/app。
 #
 # 安全护栏：只允许删除绝对路径、拒绝 /、拒绝含 ".." 的路径；
 #           每条被删的项都会先打印出来。删除不可恢复，板端没有回收站。
@@ -51,6 +51,9 @@ case "${ARG}" in
     ;;
 esac
 
+if [[ "${ARG}" == logs || "${ARG}" == records ]]; then
+    exec bash "${SCRIPT_DIR}/clean-rtos-data" "${ARG}"
+fi
 rtos_resolve_transport
 
 # 清空一个目录下的所有条目（目录本身保留）。
@@ -62,6 +65,8 @@ wipe_children() {
     local name
     local found=0
     local kept=0
+    local children
+    children="$(rtos_list_children "${dir}")" || die "无法读取目录：${dir}"
     while IFS= read -r name; do
         [[ -n "${name}" ]] || continue
         if [[ " ${RTOS_KEEP_NAMES} " == *" ${name} "* ]]; then
@@ -72,7 +77,7 @@ wipe_children() {
         found=1
         info "  删除 ${dir}/${name}"
         rtos_remove "${dir}/${name}"
-    done < <(rtos_list_children "${dir}")
+    done <<< "${children}"
     if [[ "${found}" == "0" && "${kept}" == "0" ]]; then
         info "  ${dir} 已经是空的"
     fi
@@ -83,10 +88,6 @@ case "${ARG}" in
     info "清空 ${RTOS_DIR} 下的全部内容（保留 ${RTOS_DIR} 本身）"
     rtos_assert_safe_path "${RTOS_DIR}"
     wipe_children "${RTOS_DIR}"
-    ;;
-logs | records)
-    info "清空 ${RTOS_DIR}/${ARG}/*（保留 ${ARG} 目录）"
-    wipe_children "${RTOS_DIR}/${ARG}"
     ;;
 list)
     info "删除 ${RTOS_DIR}/startup_final.list"

@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# 清除 /data/app 与 /sdcard/app 中的新旧日志、录像，支持 SSH、读卡器和 GIO/MTP。
+# 用法：clean-rtos-data [--dry-run] [logs|records]
+# 无目标参数时清日志和录像；--dry-run 只列出待删除项。
+# 含历史归档内的 logs* / records* / rec_NNNN 目录及 *.log、检测 CSV、视频文件。
+# 保留程序、清单、目录本身及 *.pid / *.done；写入中或无法确认空闲的项跳过。
+# 读卡器需同时设置 SDCARD 与 DATA_SDCARD；USB 默认自动使用两个 MTP store。
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=.script/_rtos-common.sh
+source "${SCRIPT_DIR}/_rtos-common.sh"
+
+CHECK_SECONDS="${RTOS_IDLE_CHECK_SECONDS:-2}"
+[[ "${CHECK_SECONDS}" =~ ^([1-9]|[1-5][0-9]|60)$ ]] || die "RTOS_IDLE_CHECK_SECONDS 必须是 1 到 60 的整数秒"
+command -v sha256sum >/dev/null || die "找不到 sha256sum（用于检测写入变化）"
+DRY_RUN=0
+TARGET=''
+for arg in "$@"; do
+    case "${arg}" in
+    -h | --help) sed -n '2,7s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --dry-run) DRY_RUN=1 ;;
+    logs | records)
+        [[ -z "${TARGET}" ]] || die "只能指定一个目标：logs 或 records"
+        TARGET="${arg}"
+        ;;
+    *) die "未知参数：${arg}（可选 --dry-run、logs、records）" ;;
+    esac
+done
+
+rtos_resolve_transport
+rtos_resolve_data_transport
+if [[ "${RTOS_MODE}" == scp ]]; then
+    APP_STORE="$(dirname "${RTOS_DIR}")"
+    DATA_STORE="$(dirname "${RTOS_DATA_DIR}")"
+else
+    APP_STORE="${RTOS_TARGET}"
+    DATA_STORE="${RTOS_DATA_STORE}"
+fi
+
+PATHS=()
+SCAN_SKIPPED=0
+add_target() {
+    rtos_assert_safe_path "$1"
+    PATHS+=("$1")
+}
+
+# 日志目录中只保留进程管理文件；录像目录中的子项整体删除，释放目录占用。
+# 在归档中继续寻找日志与录像目录，但不跟随符号链接。
+scan_data() {
+    local dir="$1" category="${2:-}" entries kind name path next
+    if ! entries="$(rtos_list_entries "${dir}")"; then
+        info "  跳过（目录忙碌或无法读取）${dir}"
+        SCAN_SKIPPED=$((SCAN_SKIPPED + 1))
+        return 0
+    fi
+    while IFS=$'\t' read -r kind name; do
+        [[ -n "${name}" ]] || continue
+        path="${dir}/${name}"
+        rtos_assert_safe_path "${path}"
+        if [[ "${category}" == records ]]; then
+            add_target "${path}"
+        elif [[ "${kind}" == d ]]; then
+            case "${name}" in examples | kmodel | isp) continue ;; esac
+            next="${category}"
+            case "${name}" in
+            logs | logs-* | logs_*) next=logs ;;
+            records | records-* | records_* | rec_[0-9]*)
+                [[ "${TARGET}" != logs ]] || continue
+                # rec_NNNN 本身即一段录像，不保留空的分组目录。
+                if [[ "${name}" == rec_[0-9]* ]]; then
+                    add_target "${path}"
+                    continue
+                fi
+                next=records
+                ;;
+            esac
+            scan_data "${path}" "${next}"
+        else
+            # 符号链接既不遍历也不删除，防止别名引入根目录外的数据。
+            [[ "${kind}" != l ]] || continue
+            case "${name}" in *.pid | *.done) continue ;; esac
+            if [[ "${TARGET}" != records ]]; then
+                case "${category}:${name}" in
+                logs:* | *:*.log | *:*.log.*) add_target "${path}"; continue ;;
+                esac
+            fi
+            if [[ "${TARGET}" != logs ]]; then
+                case "${name}" in
+                detection.csv | detect.csv | frames.csv | *.mp4 | *.avi | *.mkv)
+                    add_target "${path}"
+                    ;;
+                esac
+            fi
+        fi
+    done <<< "${entries}"
+}
+
+# 两个分区均完成扫描后才开始删除；分区不可访问时退出，忙碌的子目录跳过。
+scan_root() {
+    local store="$1" dir="$2" status
+    if rtos_directory_exists "${store}" "${dir}"; then
+        scan_data "${dir}"
+    else
+        status=$?
+        [[ "${status}" == 1 ]] || die "无法检查应用目录：${dir}"
+        info "目录不存在，跳过：${dir}"
+    fi
+}
+scan_root "${DATA_STORE}" "${RTOS_DATA_DIR}"
+scan_root "${APP_STORE}" "${RTOS_DIR}"
+
+# 一起观察所有目标，只等待一次。删除前再比较，避免清理前面的大录像时后面的目标已变化。
+STATES=()
+SKIPPED=${SCAN_SKIPPED}
+DELETED=0
+WRITERS="$(rtos_open_write_paths "${RTOS_DIR}" "${RTOS_DATA_DIR}")" || die "无法检测打开的写句柄"
+has_writer() {
+    local writer
+    while IFS= read -r writer; do
+        case "${writer}" in "$1" | "$1"/*) return 0 ;; esac
+    done <<< "${WRITERS}"
+    return 1
+}
+for path in "${PATHS[@]}"; do
+    if has_writer "${path}"; then
+        STATES+=('writer')
+    elif state="$(rtos_data_snapshot "${path}" 2>/dev/null)"; then
+        STATES+=("${state}")
+    else
+        STATES+=('')
+    fi
+done
+if [[ ${#PATHS[@]} -gt 0 ]]; then
+    info "观察写入变化（${CHECK_SECONDS} 秒）……"
+    sleep "${CHECK_SECONDS}"
+fi
+WRITERS="$(rtos_open_write_paths "${RTOS_DIR}" "${RTOS_DATA_DIR}")" || die "无法复查打开的写句柄"
+for i in "${!PATHS[@]}"; do
+    path="${PATHS[i]}"
+    if [[ "${STATES[i]}" == writer ]] || has_writer "${path}"; then
+        info "  跳过（文件或目录内有打开的写句柄）${path}"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+    if [[ -z "${STATES[i]}" ]] || ! state="$(rtos_data_snapshot "${path}" 2>/dev/null)"; then
+        info "  跳过（无法确认空闲）${path}"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+    if [[ "${state}" != "${STATES[i]}" ]]; then
+        info "  跳过（正在写入或目录内容变化）${path}"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+    if [[ "${DRY_RUN}" == 1 ]]; then
+        info "  待删除 ${path}"
+    else
+        info "  删除 ${path}"
+        if ! rtos_remove "${path}"; then
+            info "  跳过（删除被拒绝，保留剩余内容）${path}"
+            SKIPPED=$((SKIPPED + 1))
+            continue
+        fi
+    fi
+    DELETED=$((DELETED + 1))
+done
+if [[ "${DRY_RUN}" == 1 ]]; then
+    info "预览完成，待删除 ${DELETED} 项，跳过 ${SKIPPED} 项；未删除任何文件。"
+else
+    [[ "${RTOS_MODE}" != card ]] || sync
+    info "清理完成，删除 ${DELETED} 项，跳过 ${SKIPPED} 项；程序、启动清单、PID 与完成标记已保留。"
+fi

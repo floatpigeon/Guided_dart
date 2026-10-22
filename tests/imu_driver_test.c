@@ -1,182 +1,348 @@
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
 
 #include "drv_spi.h"
-#include "spi/iim42622.h"
+#include "spi/iim42652.h"
 
-static int create_failed, fail_read_at, fail_write_at, live, destroys;
-static int reads, writes, corrupt_config, change_reset_id;
-static uint8_t device_id, registers[128];
-static struct timespec powered_at;
+static struct {
+    uint8_t regs[2][128], bank, id, axis_disable;
+    int create_failed, fail_read_at, fail_write_at, corrupt_config, change_reset_id;
+    int live, destroys, reads, writes, sample_reads, interrupt_sleeps, interrupted;
+    int fail_sleep, fail_clock, never_ready, invalid_one_axis;
+    int allow_raw_probe, all_reads_ff, all_sample_ff, all_sample_zero;
+    int fail_raw_probe_at, raw_probe_reads;
+    uint64_t now, reset_at, powered_at, ready_after_ns, interrupt_min_ns;
+} fake;
 static int instance;
+
+/* A controlled monotonic clock lets us check deadlines and interrupted waits
+ * without turning the timeout tests into multi-second wall-clock delays. */
+int __wrap_clock_gettime(clockid_t id, struct timespec* now) {
+    assert(id == CLOCK_MONOTONIC);
+    if (fake.fail_clock) { errno = EIO; return -1; }
+    now->tv_sec = (time_t)(fake.now / 1000000000u);
+    now->tv_nsec = (long)(fake.now % 1000000000u);
+    return 0;
+}
+
+int __wrap_nanosleep(const struct timespec* request, struct timespec* remaining) {
+    const uint64_t ns = (uint64_t)request->tv_sec * 1000000000u + request->tv_nsec;
+    if (fake.fail_sleep) { errno = EIO; return -1; }
+    if (fake.interrupt_sleeps && ns > 0u && ns >= fake.interrupt_min_ns) {
+        const uint64_t left = ns - ns / 2u;
+        fake.now += ns / 2u;
+        remaining->tv_sec = (time_t)(left / 1000000000u);
+        remaining->tv_nsec = (long)(left % 1000000000u);
+        --fake.interrupt_sleeps;
+        ++fake.interrupted;
+        errno = EINTR;
+        return -1;
+    }
+    fake.now += ns;
+    return 0;
+}
 
 int drv_spi_inst_create(
     int bus, bool active_low, int mode, uint32_t baudrate, uint8_t bits, int cs, uint8_t lines,
     drv_spi_inst_t* out) {
     assert(bus == 1 && active_low && mode == SPI_HAL_MODE_3 && baudrate == 1000000);
     assert(bits == 8 && cs == 14 && lines == SPI_HAL_DATA_LINE_1);
-    /* Match the SDK factory's failure contract: non-null output, no live handle. */
-    *out = (drv_spi_inst_t)&instance;
-    if (create_failed)
-        return -1;
-    live = 1;
+    *out = (drv_spi_inst_t)&instance; /* SDK also leaves this pointer on failure. */
+    if (fake.create_failed) return -1;
+    fake.live = 1;
     return 0;
 }
 
 void drv_spi_inst_destroy(drv_spi_inst_t* handle) {
-    assert(live && *handle == (drv_spi_inst_t)&instance);
-    ++destroys;
-    live = 0;
+    assert(fake.live && *handle == (drv_spi_inst_t)&instance);
+    ++fake.destroys;
+    fake.live = 0;
+}
+
+static void check_reset_wait(void) {
+    if (fake.reset_at) assert(fake.now - fake.reset_at >= 1000000u);
+}
+
+static void sample_bytes(uint8_t bytes[14]) {
+    /* 26 C, +1 g X, -0.5 g Y, +16.4 dps X, -32.8 dps Z. */
+    const uint8_t valid[] = {0, 132, 8, 0, 0xfc, 0, 0, 0, 1, 13, 0, 0, 0xfd, 0xe6};
+    memcpy(bytes, valid, sizeof(valid));
+    if (fake.never_ready || fake.now - fake.powered_at < fake.ready_after_ns) {
+        for (int axis = 0; axis < 3; ++axis) {
+            bytes[8 + axis * 2] = 0x80;
+            bytes[9 + axis * 2] = 0;
+        }
+    } else if (fake.invalid_one_axis) {
+        bytes[10] = 0x80;
+        bytes[11] = 0;
+    }
+    if (fake.all_sample_ff) memset(bytes, 0xff, 14);
+    if (fake.all_sample_zero) memset(bytes, 0, 14);
 }
 
 int drv_spi_transfer(
     drv_spi_inst_t handle, const void* tx, void* rx, size_t length, bool cs_change) {
-    assert(live && handle == (drv_spi_inst_t)&instance && cs_change);
-    if (++reads == fail_read_at)
-        return -1;
+    assert(fake.live && handle == (drv_spi_inst_t)&instance && cs_change);
+    if (++fake.reads == fake.fail_read_at) return -1;
+    check_reset_wait();
     const uint8_t command = ((const uint8_t*)tx)[0];
+    assert(command & 0x80);
+    const uint8_t reg = command & 0x7f;
+    uint8_t* out = (uint8_t*)rx + 1;
     memset(rx, 0, length);
-    if (command == 0xf5) {
-        assert(length == 2);
-        ((uint8_t*)rx)[1] = change_reset_id && reads > 1 ? 0xff : device_id;
-    } else if (command == 0xce) {
-        assert(length == 4);
-        memcpy((uint8_t*)rx + 1, registers + 0x4e, 3);
-        if (corrupt_config)
-            ((uint8_t*)rx)[1] = 0;
-    } else if (command == 0xcc) {
-        assert(length == 3);
-        ((uint8_t*)rx)[1] = 0x30;
-        ((uint8_t*)rx)[2] = 0x91;
-    } else if (command == 0xad) {
-        assert(length == 2);
-        ((uint8_t*)rx)[1] = 0x18;
-    } else if (command >= 0xa5 && command <= 0xaa) {
-        const uint8_t values[] = {0x01, 0x0d, 0x00, 0x00, 0xfd, 0xe6};
-        assert(length == 2);
-        ((uint8_t*)rx)[1] = values[command - 0xa5];
+    if (fake.all_reads_ff) {
+        memset(out, 0xff, length - 1);
+        return (int)length;
+    }
+    if (reg == 0x75) {
+        assert(fake.bank == 0 && length == 2);
+        out[0] = fake.change_reset_id && fake.reset_at ? 0xff : fake.id;
+    } else if (fake.bank == 0 && reg == 0x2d) {
+        /* DATA_RDY can be true even when every gyro axis is invalid. */
+        out[0] = fake.regs[0][0x2d] | (fake.powered_at ? 0x08 : 0);
+        fake.regs[0][0x2d] = 0; /* Read-to-clear. */
+    } else if (fake.bank == 0 && (reg == 0x1d || (reg >= 0x25 && reg <= 0x2a))) {
+        uint8_t bytes[14];
+        if (!fake.powered_at) {
+            assert(fake.allow_raw_probe && reg == 0x1d && length == 15);
+        } else {
+            assert(fake.now - fake.powered_at >= 50000000u);
+        }
+        if (reg == 0x1d && ++fake.raw_probe_reads == fake.fail_raw_probe_at) return -1;
+        sample_bytes(bytes);
+        if (reg == 0x1d) {
+            assert(length == 15);
+            ++fake.sample_reads;
+            memcpy(out, bytes, 14);
+        } else {
+            assert(length == 2);
+            out[0] = bytes[reg - 0x1d];
+        }
     } else {
-        assert(command == 0x9d && length == 15);
-        assert(writes == 4 && registers[0x4e] == 0x0f);
-        struct timespec now;
-        assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
-        const int64_t elapsed = (now.tv_sec - powered_at.tv_sec) * INT64_C(1000000000) + now.tv_nsec
-                              - powered_at.tv_nsec;
-        assert(elapsed >= 45000000); /* No samples during gyro startup. */
-        /* 26 C, +1 g on X, -0.5 g on Y, +16.4 dps on X, -32.8 dps on Z. */
-        const uint8_t sample[] = {0x00, 0x84, 0x08, 0x00, 0xfc, 0x00, 0x00,
-                                  0x00, 0x01, 0x0d, 0x00, 0x00, 0xfd, 0xe6};
-        memcpy((uint8_t*)rx + 1, sample, sizeof(sample));
+        assert(reg + length - 1 <= 128);
+        memcpy(out, fake.regs[fake.bank] + reg, length - 1);
+        if (fake.corrupt_config && reg == 0x4e) out[0] = 0;
     }
     return (int)length;
 }
 
 int drv_spi_write(drv_spi_inst_t handle, const void* tx, size_t length, bool change) {
-    assert(live && handle == (drv_spi_inst_t)&instance && change && length == 2);
-    if (++writes == fail_write_at)
-        return -1;
+    assert(fake.live && handle == (drv_spi_inst_t)&instance && change && length == 2);
+    if (++fake.writes == fake.fail_write_at) return -1;
+    check_reset_wait();
     const uint8_t* bytes = tx;
-    /* Model the device rule: configure before enabling, no writes after enable. */
-    assert(registers[0x4e] == 0);
-    if (bytes[0] == 0x11) {
-        assert(bytes[1] == 1 && writes == 1);
-        memset(registers, 0, sizeof(registers));
-    } else if (bytes[0] == 0x4f || bytes[0] == 0x50) {
-        registers[bytes[0]] = bytes[1];
+    /* Initialization must complete every configuration write before enable. */
+    assert(!fake.powered_at);
+    if (bytes[0] == 0x76) {
+        assert(bytes[1] <= 1);
+        fake.bank = bytes[1];
+    } else if (bytes[0] == 0x11) {
+        assert(fake.bank == 0 && bytes[1] == 1);
+        memset(fake.regs, 0, sizeof(fake.regs));
+        fake.regs[0][0x4c] = 0x30;
+        fake.regs[0][0x4d] = 0x91;
+        fake.regs[0][0x2d] = 0x10;
+        fake.regs[1][0x03] = 0x80 | fake.axis_disable;
+        fake.reset_at = fake.now;
     } else {
-        assert(bytes[0] == 0x4e && bytes[1] == 0x0f && writes == 4);
-        assert(registers[0x4f] == 6 && registers[0x50] == 6);
-        registers[0x4e] = bytes[1];
-        assert(clock_gettime(CLOCK_MONOTONIC, &powered_at) == 0);
+        assert(fake.bank == 0);
+        assert(bytes[0] == 0x4f || bytes[0] == 0x50 || bytes[0] == 0x4e);
+        fake.regs[0][bytes[0]] = bytes[1];
+        if (bytes[0] == 0x4e) {
+            assert(bytes[1] == 0x0f);
+            assert(fake.regs[0][0x4f] == 6 && fake.regs[0][0x50] == 6);
+            fake.powered_at = fake.now;
+        }
     }
     return (int)length;
 }
 
-static void clear_fake(uint8_t id) {
-    assert(!live);
-    create_failed = fail_read_at = fail_write_at = destroys = reads = writes = 0;
-    corrupt_config = change_reset_id = 0;
-    device_id = id;
-    memset(registers, 0, sizeof(registers));
+static dart_iim42652_config_t config(void) {
+    dart_iim42652_config_t c = {0};
+    c.bus = 1;
+    c.chip_select_pin = 14;
+    c.bus_hz = 1000000;
+    c.timeout_ms = 20;
+    c.ready_timeout_ms = 20;
+    return c;
+}
+
+static void clear_fake(void) {
+    assert(!fake.live);
+    memset(&fake, 0, sizeof(fake));
+    fake.id = 0x6f;
+    fake.now = 1000000000u;
+}
+
+static int initialize(dart_iim42652_config_t c, dart_iim42652_diagnostic_t* d) {
+    dart_iim42652_t* sensor = NULL;
+    fake.allow_raw_probe = c.skip_device_id_check;
+    const int result = dart_iim42652_init_with_diagnostic(&c, &sensor, d);
+    assert(d->result == result);
+    if (result == DART_IIM42652_OK) {
+        assert(sensor && fake.live);
+        assert(d->ready_ns && d->stage == DART_IIM42652_STAGE_READY);
+        assert(d->sensor_config_read && d->sensor_config0 == 0x80);
+        assert(d->registers_read && d->power_config == 0x0f && d->gyro_config == 6);
+        dart_iim42652_sample_t sample;
+        assert(dart_iim42652_read_sample(sensor, &sample) == DART_IIM42652_OK);
+        assert(sample.timestamp_ns > 0 && sample.flags == 0);
+        assert(sample.accelerometer[0] == 2048 && sample.accelerometer[1] == -1024);
+        assert(fabsf(sample.acceleration_m_s2[0] - 9.80665f) < 0.0001f);
+        assert(fabsf(sample.angular_velocity_rad_s[2] + 0.57253f) < 0.001f);
+        assert(fabsf(sample.temperature_c - 26.0f) < 0.01f);
+        if (c.skip_device_id_check) {
+            /* A valid first sample cannot hide a later disconnected bus. */
+            fake.all_sample_ff = 1;
+            assert(dart_iim42652_read_sample(sensor, &sample) == DART_IIM42652_BUS_ERROR);
+            fake.all_sample_ff = 0;
+            fake.all_sample_zero = 1;
+            assert(dart_iim42652_read_sample(sensor, &sample) == DART_IIM42652_BUS_ERROR);
+            fake.all_sample_zero = 0;
+        }
+        dart_iim42652_deinit(&sensor);
+        dart_iim42652_deinit(&sensor);
+    }
+    assert(!sensor && !fake.live);
+    return result;
 }
 
 int main(void) {
-    dart_iim42622_config_t config = {0};
-    config.bus = 1;
-    config.chip_select_pin = 14;
-    config.bus_hz = 1000000;
-    config.timeout_ms = 20;
-    for (int test = 0; test < 16; ++test) {
-        clear_fake(test >= 4 ? 0x6f : 0x46);
-        create_failed = test == 0;
-        if (test == 1)
-            fail_read_at = 1;
-        if (test == 2)
-            device_id = 0xff;
-        if (test == 5)
-            device_id = 0x00;
-        if (test == 6)
-            device_id = 0x47; /* Do not silently accept other variants. */
-        if (test == 7)
-            change_reset_id = 1;
-        if (test >= 8 && test <= 11)
-            fail_write_at = test - 7;
-        if (test == 12)
-            fail_read_at = 2;
-        if (test == 13)
-            fail_read_at = 3;
-        if (test == 14)
-            corrupt_config = 1;
-        dart_iim42622_t* sensor = NULL;
-        dart_iim42622_diagnostic_t diagnostic;
-        const int rc = dart_iim42622_init_with_diagnostic(&config, &sensor, &diagnostic);
-        assert(diagnostic.device_id_read == (test >= 2));
-        if (test >= 2)
-            assert(diagnostic.observed_device_id == device_id);
-        if (test == 3 || test == 4 || test == 15) {
-            assert(rc == DART_IIM42622_OK && sensor != NULL && live);
-            assert(diagnostic.expected_device_id == device_id);
-            assert(
-                diagnostic.registers_read && diagnostic.interface_config0 == 0x30
-                && diagnostic.interface_config1 == 0x91 && diagnostic.power_config == 0x0f);
-            assert(
-                diagnostic.gyro_config == 6 && diagnostic.accel_config == 6
-                && diagnostic.interrupt_status == 0x18);
-            assert(
-                diagnostic.individual_gyroscope[0] == 269
-                && diagnostic.individual_gyroscope[2] == -538);
-            assert(
-                strcmp(
-                    dart_iim42622_device_name(device_id),
-                    device_id == 0x46 ? "ICM-42622-P" : "IIM-42652")
-                == 0);
-            dart_iim42622_sample_t sample;
-            assert(dart_iim42622_read_sample(sensor, &sample) == DART_IIM42622_OK);
-            assert(sample.timestamp_ns > 0 && sample.flags == 0);
-            assert(sample.accelerometer[0] == 2048 && sample.accelerometer[1] == -1024);
-            assert(fabsf(sample.acceleration_m_s2[0] - 9.80665f) < 0.0001f);
-            assert(fabsf(sample.angular_velocity_rad_s[2] + 0.57253f) < 0.001f);
-            assert(fabsf(sample.temperature_c - 26.0f) < 0.01f);
-            dart_iim42622_deinit(&sensor);
-            dart_iim42622_deinit(&sensor);
-            assert(sensor == NULL && !live && destroys == 1);
-        } else {
-            const int expected = test == 2 || test == 5 || test == 6
-                                   ? DART_IIM42622_UNEXPECTED_DEVICE_ID
-                               : test == 14 ? DART_IIM42622_CONFIGURATION_MISMATCH
-                                            : DART_IIM42622_BUS_ERROR;
-            assert(rc == expected);
-            assert(sensor == NULL && !live && destroys == (test != 0));
+    dart_iim42652_diagnostic_t d;
+    clear_fake();
+    assert(initialize(config(), &d) == DART_IIM42652_OK);
+    assert(d.first_read_ns - d.enabled_ns == 50000000u);
+    assert(d.interrupt_status_seen == 0x18 && d.interrupt_status == 0x08);
+    assert(d.individual_gyroscope_read && d.individual_gyroscope[2] == -538);
+    const int normal_reads = fake.reads - 1; /* Exclude the consumer's sample read. */
+    const int normal_writes = fake.writes;
+
+    /* All mandatory transfer failures release the handle. Optional byte
+     * diagnostics cannot turn success into failure. Bank is restored on a
+     * failed Bank 1 read. */
+    for (int read = 1; read <= normal_reads; ++read) {
+        clear_fake();
+        fake.fail_read_at = read;
+        const int rc = initialize(config(), &d);
+        assert(rc == (read <= normal_reads - 6 ? DART_IIM42652_BUS_ERROR : DART_IIM42652_OK));
+        assert(fake.destroys == 1 && fake.bank == 0);
+    }
+    for (int write = 1; write <= normal_writes; ++write) {
+        clear_fake();
+        fake.fail_write_at = write;
+        assert(initialize(config(), &d) == DART_IIM42652_BUS_ERROR);
+        assert(fake.destroys == 1);
+    }
+    clear_fake(); fake.create_failed = 1;
+    assert(initialize(config(), &d) == DART_IIM42652_BUS_ERROR && fake.destroys == 0);
+    const uint8_t unsupported[] = {0, 0xff, 0x46, 0x47};
+    for (unsigned int i = 0; i < sizeof(unsupported); ++i) {
+        clear_fake(); fake.id = unsupported[i];
+        assert(initialize(config(), &d) == DART_IIM42652_UNEXPECTED_DEVICE_ID);
+        assert(d.device_id_read && d.observed_device_id == unsupported[i]);
+    }
+    clear_fake(); fake.change_reset_id = 1;
+    assert(initialize(config(), &d) == DART_IIM42652_UNEXPECTED_DEVICE_ID);
+    clear_fake(); fake.corrupt_config = 1;
+    assert(initialize(config(), &d) == DART_IIM42652_CONFIGURATION_MISMATCH);
+    clear_fake(); fake.axis_disable = 0x08;
+    assert(initialize(config(), &d) == DART_IIM42652_CONFIGURATION_MISMATCH);
+    assert(d.sensor_config_read && d.sensor_config0 == 0x88 && !fake.powered_at);
+
+    clear_fake(); fake.never_ready = 1;
+    assert(initialize(config(), &d) == DART_IIM42652_READY_TIMEOUT);
+    assert(d.stage == DART_IIM42652_STAGE_WAIT_DATA && !d.ready_ns);
+    assert(d.readiness_polls == 5 && d.finished_ns - d.first_read_ns == 20000000u);
+    assert(d.last_gyroscope[0] == INT16_MIN && d.individual_gyroscope[2] == INT16_MIN);
+    assert(d.interrupt_status_seen == 0x18); /* Status bits do not imply valid gyro. */
+    clear_fake(); fake.invalid_one_axis = 1;
+    assert(initialize(config(), &d) == DART_IIM42652_READY_TIMEOUT);
+    clear_fake(); fake.ready_after_ns = 65000000u;
+    assert(initialize(config(), &d) == DART_IIM42652_OK);
+    assert(d.readiness_polls == 4 && d.ready_ns - d.enabled_ns == 65000000u);
+
+    clear_fake(); fake.interrupt_sleeps = 3;
+    dart_iim42652_config_t c = config();
+    c.pre_access_delay_ms = 200;
+    c.post_enable_delay_ms = 200;
+    assert(initialize(c, &d) == DART_IIM42652_OK);
+    assert(fake.interrupted == 3);
+    assert(d.first_access_ns - d.started_ns == 200000000u);
+    assert(d.first_read_ns - d.enabled_ns == 200000000u);
+    clear_fake(); fake.interrupt_sleeps = 1; fake.interrupt_min_ns = 50000000u;
+    assert(initialize(config(), &d) == DART_IIM42652_OK);
+    assert(fake.interrupted == 1 && d.first_read_ns - d.enabled_ns == 50000000u);
+    clear_fake(); fake.fail_sleep = 1;
+    assert(initialize(config(), &d) == DART_IIM42652_CLOCK_ERROR);
+    clear_fake(); fake.fail_clock = 1;
+    assert(initialize(config(), &d) == DART_IIM42652_CLOCK_ERROR && fake.destroys == 0);
+    clear_fake(); c = config(); c.post_enable_delay_ms = 1;
+    assert(initialize(c, &d) == DART_IIM42652_INVALID_ARGUMENT);
+    assert(!fake.reads && !fake.writes);
+    assert(strcmp(dart_iim42652_device_name(0x6f), "IIM-42652") == 0);
+    assert(strcmp(dart_iim42652_device_name(0x46), "unknown") == 0);
+
+    /* Bypass both identity comparisons, but keep the real IDs and raw bytes. */
+    c = config(); c.skip_device_id_check = 1;
+    for (unsigned int i = 0; i < sizeof(unsupported); ++i) {
+        clear_fake(); fake.id = unsupported[i];
+        assert(initialize(c, &d) == DART_IIM42652_OK);
+        assert(d.device_id_check_skipped && d.observed_device_id == unsupported[i]);
+        assert(d.reset_device_id_read && d.reset_device_id == unsupported[i]);
+        assert(d.raw_probe_read && d.raw_probe_stage == DART_IIM42652_STAGE_WAIT_DATA);
+        assert(d.raw_probe[2] == 8 && d.raw_probe[8] == 1 && d.raw_probe[13] == 0xe6);
+    }
+    clear_fake(); fake.change_reset_id = 1;
+    assert(initialize(c, &d) == DART_IIM42652_OK);
+    assert(d.observed_device_id == 0x6f && d.reset_device_id == 0xff);
+
+    /* ID transport errors still fail, after the direct diagnostic burst. */
+    for (int read = 2; read <= 3; ++read) {
+        clear_fake(); fake.fail_read_at = read;
+        assert(initialize(c, &d) == DART_IIM42652_BUS_ERROR);
+        assert(d.raw_probe_read && d.raw_probe_stage == DART_IIM42652_STAGE_IDENTIFY);
+        assert(d.device_id_read == (read == 3) && !d.reset_device_id_read);
+    }
+    clear_fake(); fake.fail_raw_probe_at = 1;
+    assert(initialize(c, &d) == DART_IIM42652_OK); /* Optional probe is best effort. */
+    clear_fake(); fake.corrupt_config = 1;
+    assert(initialize(c, &d) == DART_IIM42652_CONFIGURATION_MISMATCH);
+    assert(d.raw_probe_read && d.raw_probe_stage == DART_IIM42652_STAGE_VERIFY);
+    clear_fake(); fake.corrupt_config = 1; fake.fail_raw_probe_at = 2;
+    assert(initialize(c, &d) == DART_IIM42652_CONFIGURATION_MISMATCH);
+    assert(d.raw_probe_read && d.raw_probe_stage == DART_IIM42652_STAGE_IDENTIFY);
+    clear_fake(); fake.axis_disable = 0x08;
+    assert(initialize(c, &d) == DART_IIM42652_CONFIGURATION_MISMATCH);
+    assert(d.raw_probe_read && !fake.powered_at);
+
+    /* A floating bus is observable, never promoted to a usable device. */
+    clear_fake(); fake.all_reads_ff = 1;
+    assert(initialize(c, &d) == DART_IIM42652_CONFIGURATION_MISMATCH);
+    assert(d.device_id_check_skipped && d.observed_device_id == 0xff);
+    assert(d.reset_device_id == 0xff && d.raw_probe_read && !d.ready_ns);
+    assert(d.stage == DART_IIM42652_STAGE_CONFIGURE);
+    assert(d.raw_probe_stage == DART_IIM42652_STAGE_IDENTIFY);
+    for (unsigned int i = 0; i < sizeof(d.raw_probe); ++i) assert(d.raw_probe[i] == 0xff);
+    for (int bypass = 0; bypass <= 1; ++bypass) {
+        c.skip_device_id_check = (uint8_t)bypass;
+        for (int zero = 0; zero <= 1; ++zero) {
+            clear_fake(); fake.all_sample_zero = zero; fake.all_sample_ff = !zero;
+            assert(initialize(c, &d) == DART_IIM42652_READY_TIMEOUT);
+            assert(!d.ready_ns && d.readiness_polls == 5);
+            assert(d.raw_probe_read == bypass);
+            if (bypass) {
+                for (unsigned int i = 0; i < sizeof(d.raw_probe); ++i)
+                    assert(d.raw_probe[i] == (zero ? 0 : 0xff));
+            }
         }
     }
-    assert(strcmp(dart_iim42622_device_name(0), "unknown") == 0);
-    clear_fake(0x6f);
-    dart_iim42622_t* sensor = NULL;
-    assert(dart_iim42622_init(&config, &sensor) == DART_IIM42622_OK);
-    dart_iim42622_deinit(&sensor);
+    clear_fake(); c.skip_device_id_check = 2;
+    assert(initialize(c, &d) == DART_IIM42652_INVALID_ARGUMENT);
+    assert(!fake.reads && !fake.writes);
     return 0;
 }

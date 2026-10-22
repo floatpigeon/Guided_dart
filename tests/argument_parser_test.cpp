@@ -36,7 +36,7 @@ public:
         char* bad_options[] = {program, format, bad_format};
         assert(!app::parse_args(3, bad_options));
         assert(parsed->raw10_layout == camera::Raw10Layout::kPackedLsb);
-        assert(!parsed->imu_on);
+        assert(!parsed->imu_on && !parsed->imu_ignore_id);
         char record[] = "--record";
         char off[] = "off";
         char seconds[] = "--seconds";
@@ -112,6 +112,16 @@ public:
         char empty[] = "";
         char* empty_log[] = {program, imu_log, empty};
         assert(!app::parse_args(3, empty_log));
+        char ignore_id[] = "--imu-ignore-id";
+        char* bypass[] = {program, imu, on, bus, zero, cs, hal_cs, ignore_id, on};
+        parsed = app::parse_args(9, bypass);
+        assert(parsed && parsed->imu_on && parsed->imu_ignore_id);
+        bypass[8] = off;
+        parsed = app::parse_args(9, bypass);
+        assert(parsed && !parsed->imu_ignore_id);
+        bypass[8] = ten;
+        assert(!app::parse_args(9, bypass));
+        assert(!app::parse_args(8, bypass));
     }
 };
 

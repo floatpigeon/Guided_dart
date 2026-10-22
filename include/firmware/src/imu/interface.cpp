@@ -16,6 +16,7 @@ enum class ErrorCode : std::uint8_t {
     kBusTransfer,
     kUnexpectedDeviceId,
     kClock,
+    kReadyTimeout,
 };
 
 class IImu {

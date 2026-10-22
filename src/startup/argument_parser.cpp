@@ -29,6 +29,7 @@ public:
     char det_csv[512] = "";    /* 空 = 关闭 */
     char log_path[512] = "/data/app/logs/dart_app.log";
     bool imu_on = false;
+    bool imu_ignore_id = false;
     int imu_bus = -1;
     int imu_cs = -2;           /* -2 = 未配置；-1 = HAL 默认片选。 */
     char imu_log[512] = "/data/app/logs/imu.log";
@@ -100,7 +101,8 @@ inline void usage(const char* argv0) {
     std::printf("  --imu on|off     IMU 独立采样与日志（默认 off）\n");
     std::printf("  --imu-bus N      SPI 总线 0..2，启用 IMU 时必填\n");
     std::printf("  --imu-cs N       片选引脚 0..63，-1 使用 HAL 默认，启用 IMU 时必填\n");
-    std::printf("  --imu-log PATH   原始/积分数据日志（默认 /data/app/logs/imu.log）\n");
+    std::printf("  --imu-log PATH   IMU 日志基名，每次启动加编号（默认 /data/app/logs/imu.log）\n");
+    std::printf("  --imu-ignore-id on|off  跳过 WHO_AM_I 校验并记录原始寄存器（诊断用，默认 off）\n");
     std::printf("  --acquire-ms N   单次取帧超时（默认 200）\n");
     std::printf("  --max-acquire-errors N  连续取帧错误上限，超过即退出（默认 8）\n");
     std::printf("  -h, --help       显示本帮助\n");
@@ -181,7 +183,7 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
                 args.max_acquire_errors = static_cast<std::uint32_t>(n);
             continue;
         }
-        if (a == "--vision" || a == "--record" || a == "--imu") {
+        if (a == "--vision" || a == "--record" || a == "--imu" || a == "--imu-ignore-id") {
             if (!need_value(value)) {
                 std::fprintf(
                     stderr, "%s: %.*s 缺少参数\n", argv[0], static_cast<int>(a.size()), a.data());
@@ -198,6 +200,8 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
                 args.vision_on = flag;
             else if (a == "--imu")
                 args.imu_on = flag;
+            else if (a == "--imu-ignore-id")
+                args.imu_ignore_id = flag;
             else
                 args.record_on = flag;
             continue;

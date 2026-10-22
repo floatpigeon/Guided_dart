@@ -1,14 +1,15 @@
 # .script/ —— 仓库短命令
 
-三个日常命令，在仓库里任何位置都能跑（脚本自己会定位仓库根）：
+四个日常命令，在仓库里任何位置都能跑（脚本自己会定位仓库根）：
 
 | 命令 | 作用 | 参数 |
 |---|---|---|
 | `build-rtos` | 交叉编译板端可执行文件 | `-r`（清 build-cross 重编）/ `--host`（host 编译检查）/ `launcher` / `dart_app` |
 | `deploy-rtos` | 把产物上板到 `/sdcard/app/` | `launcher` / `dart_app` / `list`（只推清单）；可加 `--keep-logs` |
+| `clean-rtos-data` | 清除两个分区上的空闲日志与录像（含历史归档），跳过写入中的项 | `--dry-run` / `logs` / `records` |
 | `clean-rtos` | 清除板端内容（**保留目录本身**；固件自带的 `examples/` 默认不动） | `launcher` / `dart_app` / `list` / `logs` / `records` / `examples` |
 
-要让上面三个名字能**直接敲**（不带 `./`、不带路径），先跑一次 `install-rtos`：
+要让上面这些名字能**直接敲**（不带 `./`、不带路径），先跑一次 `install-rtos`：
 
 ```bash
 bash .script/install-rtos --both     # 一次性；详见下面"怎么直接敲 build-rtos -r"
@@ -22,11 +23,12 @@ deploy-rtos
 deploy-rtos dart_app   # 只部署 dart_app
 ```
 
-需要指定其它板子或使用 `clean-rtos` 时，可通过环境变量或 `.script/board.env` 配置：
+需要指定其它板子时，可通过环境变量或 `.script/board.env` 配置：
 
 ```bash
 export BOARD_IP=192.168.1.100     # 网络模式：ssh/scp（需免密），优先级最高
-export SDCARD=/media/$USER/SDCARD # 读卡器模式：直接写已挂载的 SD 卡
+export SDCARD=/media/$USER/SDCARD # 读卡器：/sdcard 分区
+export DATA_SDCARD=/media/$USER/DATA # 读卡器：/data 分区（全量部署/数据清理时需要）
 export SDCARD='gphoto2://Kendryte_CanMV_001000000/store_ffff0001'
                                   # MTP 模式：板子用 USB 挂着，这是板端 /sdcard
 ```
@@ -39,12 +41,12 @@ cp .script/board.env.example .script/board.env   # 然后改里面的地址
 
 ### MTP（板子用 USB 挂着）注意
 
-板子会暴露两个存储，**只有一个是 /sdcard**：
+当前板子暴露两个存储：程序与启动清单位于 `/sdcard/app`，日志与录像位于 `/data/app`。
 
 | MTP store | 板端路径 | 说明 |
 |---|---|---|
 | `store_ffff0001` | `/sdcard` | **要部署到这个**；判据：根目录有 `revision.txt`（SDK 的 genimage 只把它写进 SDCARD 分区） |
-| `store_ffff0002` | `/data` | 写进去板子也不会启动它 |
+| `store_ffff0002` | `/data` | 数据分区，保存 `/data/app/logs` 与 `/data/app/records` |
 
 MTP 部署会核对 `revision.txt`；缺少该文件时，必须存在已部署的 `app/launcher` 与
 `app/startup_final.list` 才能确认目标，否则拒绝写入。地址也可以直接给
@@ -92,16 +94,21 @@ build-rtos                  # 增量编译 launcher + dart_app
 build-rtos -r               # 改了 CMake / 换工具链后全量重编
 deploy-rtos                 # 上板：两个 ELF + startup_final.list
 clean-rtos                  # 清空 /sdcard/app 下全部内容（目录与固件的 examples/ 保留）
-clean-rtos records          # 只清录像，保留 ELF 和清单
+clean-rtos-data --dry-run   # 预览两个分区上的日志、录像及历史归档
+clean-rtos-data             # 清日志与录像，保留程序、清单和进程管理文件
+clean-rtos records          # 只清两个分区的录像，保留 ELF 和清单
 ```
 
-`deploy-rtos` / `clean-rtos` 的地址解析顺序：
+`deploy-rtos` / `clean-rtos` / `clean-rtos-data` 的地址解析顺序：
 
 1. `BOARD_IP` 有值 → ssh/scp 模式（会先测连通性，连不上立刻报错，不会跑到一半失败）；
 2. 否则 `SDCARD` 有值 → 使用指定的卡挂载点、`app/` 目录或 URI。部署时 MTP URI
-   直接交给 GIO，gvfs 路径先取得 URI；`clean-rtos` 使用对应的本地挂载路径；
-3. 都没有 → `deploy-rtos` 默认部署到当前 USB 板子的 `store_ffff0001`；
-   `clean-rtos` 提示配置地址后退出。
+   直接交给 GIO，gvfs 路径先取得 URI；清理命令同样使用原生 GIO；
+3. 都没有 → 默认使用当前 USB 板子：程序分区 `store_ffff0001`、数据分区 `store_ffff0002`。
+
+`DATA_SDCARD` 可显式覆盖数据分区的 URI、挂载点或应用目录。读卡器模式必须指定它；
+USB 默认自动使用同一台板子的第二个 store。`BOARD_DIR` / `BOARD_DATA_DIR` 默认分别为
+`/sdcard/app` / `/data/app`；它们只配置脚本访问路径，应用运行路径仍以启动清单和 launcher 参数为准。
 
 ## 底下的实现
 
@@ -113,7 +120,7 @@ clean-rtos records          # 只清录像，保留 ELF 和清单
 | `deploy-rtos`（网络） | SSH/scp 上传与 md5 校验 |
 | `deploy-rtos`（USB/MTP） | `deploy-mtp.sh`：旧文件备份、SHA-256 回读校验与替换失败恢复 |
 | `deploy-rtos`（读卡器） | 临时文件写入、大小与 md5 校验、改名替换后再次校验 |
-| `clean-rtos` | 直接用 ssh + `rm -rf`，或本地 `rm -rf`（见 `_rtos-common.sh`） |
+| `clean-rtos` / `clean-rtos-data` | SSH、本地文件系统或 GIO/MTP 递归删除（见 `_rtos-common.sh`） |
 | `install-rtos` | 往 `~/.bashrc` / `~/.zshrc` 写一段 PATH 追加 |
 | `check-camera-pool.sh` | 用 SDK 头文件和 fake SDK 调用运行相机资源池/生命周期回归检查 |
 | `player` | 独立构建并启动 `tools/video_player` 主机录像播放器 |
@@ -125,7 +132,7 @@ clean-rtos records          # 只清录像，保留 ELF 和清单
 ```bash
 DART_BUILD_DIR=/tmp/dart-cross build-rtos
 DART_BUILD_DIR=/tmp/dart-cross deploy-rtos dart_app
-SDCARD="/media/$USER/SDCARD" deploy-rtos --keep-logs
+SDCARD="/media/$USER/SDCARD" DATA_SDCARD="/media/$USER/DATA" deploy-rtos --keep-logs
 bash .script/check-camera-pool.sh
 ```
 
@@ -136,7 +143,36 @@ bash .script/check-camera-pool.sh
 
 - 只允许删绝对路径，拒绝 `/`，拒绝含 `..` 的路径；
 - 删除前逐条打印将被删的项；
-- 远程模式只使用板端 ssh 会话里必然存在的 `ls` / `rm`，不依赖 `find`、不依赖远程 glob。
+- 列目录包含隐藏文件、保留文件名空格，不跟随符号链接；SSH 模式需要支持 POSIX shell 的会话；
+- 数据清理先扫描两个分区再删除，分区不可访问时退出，忙碌或不可读的子目录跳过；数据目标不能与程序分区相同。
+
+## 清理日志与录像
+
+```bash
+clean-rtos-data --dry-run   # 只预览，适合先确认清理范围
+clean-rtos-data             # 清理空闲日志与录像，跳过正在写入的项
+clean-rtos-data logs        # 只清日志（clean-rtos logs 同义）
+clean-rtos-data records     # 只清录像（clean-rtos records 同义）
+```
+
+脚本扫描 `/data/app` 与旧的 `/sdcard/app`，包括归档内的 `logs`、`logs-*`、`logs_*`、
+`records`、`records-*`、`records_*`、`rec_NNNN`，以及散落的 `*.log`、`*.log.*`、
+`detection.csv`、`detect.csv`、`frames.csv`、MP4/AVI/MKV。日志目录还会清除隐藏文件。
+保留程序、启动清单、ISP/模型/示例目录及日志里的 `*.pid` / `*.done`，避免破坏运行中的
+单实例锁与完成标记。脚本不会停止或重启板端程序。
+
+删除前默认观察 2 秒，并在每项删除前复查大小、修改时间和目录内容；目录会包含所有
+后代的状态，任一文件变化或新增帧都会跳过整段录像。本地/SSH 能读取 `/proc` 时也检查
+打开的写句柄，暂时没有追加数据的写入者同样跳过。无法读取元数据、目录检查失败、
+删除被拒绝时保留该项（删除过程中失败则保留剩余内容），继续处理其它目标。
+输出会分别统计删除与跳过的数量，`--dry-run` 使用相同检测。
+
+`RTOS_IDLE_CHECK_SECONDS` 可设为 1–60 的整数秒，例如：
+`RTOS_IDLE_CHECK_SECONDS=5 clean-rtos-data`。MTP 只能根据设备返回的元数据判断，
+无法查询板端写句柄，缓存的元数据或观察结束后才开始的写入仍可能漏检；需要完全
+排除并发写入时，应先停止写入程序。
+
+回归验证：`python3 tests/test_rtos_scripts.py`（用临时目录模拟三个传输方式，不操作真实板子）。
 
 ## 主机录像播放器
 
@@ -153,6 +189,6 @@ bash .script/player --check records/rec_0001
 ## 注意
 
 - 手工调试时不要与 launcher 同时跑 payload：两者都会独占 VICAP/VB。
-- `deploy-rtos <目标>` 只动该目标，不清日志；全量读卡器部署默认清 `logs/*` 与 `records/*`，
+- `deploy-rtos <目标>` 只动该目标，不清日志；全量读卡器部署默认调用 `clean-rtos-data` 清理两个分区的新旧日志与录像，
   用 `deploy-rtos --keep-logs` 可保留。网络和 MTP 部署均保留日志与录像。
 - MTP 部署会完整回读校验文件；失败时保留主机备份并报错，请按实际错误排查连接或存储。

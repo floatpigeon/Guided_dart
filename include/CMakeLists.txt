@@ -5,7 +5,7 @@
 # CMakeLists.txt；所有库目标在这里集中声明，新增模块在下面追加一节即可。
 # 本文件里的路径一律以 include/ 为基准，通过下面的模块目录变量拼接。
 #
-# 节的先后顺序有意义：spi/ 声明 DART_IMU_K230 并提供 dart_iim42622，imu/ 的
+# 节的先后顺序有意义：spi/ 声明 DART_IMU_K230 并提供 dart_iim42652，imu/ 的
 # C++ 适配器链接它，因此 spi 一节必须排在 imu 之前。
 # ===========================================================================
 
@@ -152,23 +152,23 @@ add_library(dart_camera_checks OBJECT ${_camera_classes})
 target_link_libraries(dart_camera_checks PRIVATE dart_camera_acl)
 
 # ---------------------------------------------------------------------------
-# spi —— 底层 C 封装：IIM-42622 SPI 硬件驱动
+# spi —— 底层 C 封装：IIM-42652 SPI 硬件驱动
 #
-# iim42622.h 是稳定 C ABI（只有固定宽度整数和 POD），iim42622.c 是本仓库唯一
+# iim42652.h 是稳定 C ABI（只有固定宽度整数和 POD），iim42652.c 是本仓库唯一
 # 包含 K230 SDK 厂商头（drv_spi）的翻译单元，负责 SPI 总线
 # 句柄、寄存器配置、原始值换算和厂商状态码翻译。本模块不引入 C++。
 # ---------------------------------------------------------------------------
-option(DART_IMU_K230 "Build the K230 IIM-42622 SPI backend" OFF)
+option(DART_IMU_K230 "Build the K230 IIM-42652 SPI backend" OFF)
 
 if(DART_IMU_K230)
     if(NOT CMAKE_CROSSCOMPILING OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "riscv")
         message(FATAL_ERROR "DART_IMU_K230 requires a RISC-V cross toolchain")
     endif()
-    add_library(dart_iim42622 STATIC "${_spi_dir}/iim42622.c")
+    add_library(dart_iim42652 STATIC "${_spi_dir}/iim42652.c")
     # 驱动按 C 数据面约束编译：显式 gnu11，严格告警。
-    target_compile_options(dart_iim42622 PRIVATE -Wall -Wextra -Wpedantic -std=gnu11)
-    target_include_directories(dart_iim42622 PUBLIC "${_dart_src}")
-    target_link_libraries(dart_iim42622 PRIVATE k230_rtos_app m)
+    target_compile_options(dart_iim42652 PRIVATE -Wall -Wextra -Wpedantic -std=gnu11)
+    target_include_directories(dart_iim42652 PUBLIC "${_dart_src}")
+    target_link_libraries(dart_iim42652 PRIVATE k230_rtos_app m)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ endif()
 # 纯 C++，不含厂商头文件：
 #   sample.cpp / interface.cpp   IMU 数据类与抽象接口
 #   estimator.cpp               姿态/速度估计器，纯计算、无分配
-#   k230/iim42622.cpp            C 驱动到 IImu 的适配器
+#   k230/iim42652.cpp            C 驱动到 IImu 的适配器
 # ---------------------------------------------------------------------------
 add_library(dart_imu INTERFACE)
 target_compile_features(dart_imu INTERFACE cxx_std_23)
@@ -201,23 +201,23 @@ if(DART_IMU_K230)
     target_include_directories(dart_imu_k230 INTERFACE "${_dart_src}")
     target_link_libraries(dart_imu_k230 INTERFACE dart_imu)
     # k230_rtos_app 提供 SDK include 与 autoconf.h。
-    target_link_libraries(dart_imu_k230 INTERFACE dart_iim42622 k230_rtos_app m)
+    target_link_libraries(dart_imu_k230 INTERFACE dart_iim42652 k230_rtos_app m)
 endif()
 
-# Editor support: spi/iim42622.c is only built by the cross preset, so with
+# Editor support: spi/iim42652.c is only built by the cross preset, so with
 # DART_IMU_K230 off it needs an editor-only compile command. C++ classes already
 # receive compile commands from dart_imu_checks. A borrowed command lacks the SDK
 # include paths nor -std=gnu11, so drv_spi.h, drv_spi_inst_t, SPI_HAL_MODE_3 and
 # the bool literals all look undeclared in the editor while the real build is
 # clean. This target exists purely to emit those commands: it is
 # EXCLUDE_FROM_ALL (never built, never linked, no artifact) and carries the same
-# include set and flags as dart_iim42622 / dart_imu_k230. SDK paths are resolved
+# include set and flags as dart_iim42652 / dart_imu_k230. SDK paths are resolved
 # by k230_rtos_app, so nothing is hardcoded here.
 option(DART_IMU_CLANGD_COMMANDS
     "Emit compile commands for SDK-dependent IMU sources so editors can parse them" ON)
 if(DART_IMU_CLANGD_COMMANDS AND NOT DART_IMU_K230)
     add_library(dart_imu_k230_compile_commands OBJECT EXCLUDE_FROM_ALL
-        "${_spi_dir}/iim42622.c")
+        "${_spi_dir}/iim42652.c")
     target_link_libraries(dart_imu_k230_compile_commands PRIVATE k230_rtos_app)
     target_compile_features(dart_imu_k230_compile_commands PRIVATE cxx_std_23)
     target_compile_options(dart_imu_k230_compile_commands PRIVATE
@@ -229,9 +229,9 @@ if(DART_IMU_CLANGD_COMMANDS AND NOT DART_IMU_K230)
     # neighbouring file. Declaring the C driver header as a source gives it this
     # target's include set deterministically instead of depending on which
     # neighbour clangd happens to pick.
-    set_source_files_properties("${_spi_dir}/iim42622.h" PROPERTIES LANGUAGE C)
+    set_source_files_properties("${_spi_dir}/iim42652.h" PROPERTIES LANGUAGE C)
     target_sources(dart_imu_k230_compile_commands PRIVATE
-        "${_spi_dir}/iim42622.h")
+        "${_spi_dir}/iim42652.h")
 endif()
 
 # ---------------------------------------------------------------------------

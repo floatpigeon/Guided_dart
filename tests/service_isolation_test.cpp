@@ -137,7 +137,7 @@ class ServiceIsolationTest final {
             assert(source.reads.load() > before); // The runner never stops the independent IMU.
             session.stop();
             assert(session.stats().samples > 30 && session.stats().io_errors == 0);
-            assert(read(root / "imu.log").find("# session_end samples=") != std::string::npos);
+            assert(read(session.log_path()).find("# session_end samples=") != std::string::npos);
         }
         const auto log = read(root / "app.log");
         assert(log.find(signal_stop ? "reason=signal" : "reason=deadline") != std::string::npos);

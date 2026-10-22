@@ -1,32 +1,56 @@
-# spi/ — ICM-42622-P / IIM-42652 底层 C 封装
+# spi/ — IIM-42652 底层 C 封装
 
-本目录只放**底层 C 封装（硬件驱动）**，不含 C++：
+本目录只放底层 C 驱动，不含 C++。`iim42652.h` 提供不透明句柄、配置、样本、
+状态码和初始化诊断；`iim42652.c` 是本仓库唯一包含 SDK `drv_spi.h` 的翻译单元。
+SPI 使用 mode 3，片选由 K230 HAL 管理。默认只接受 IIM-42652 的 WHO_AM_I `0x6f`。
+`0x46` 不是 IIM-42652；此前将它标成“ICM-42652-P”有误，现拒绝该 ID。
+ICM-42688-P 的 `0x47` 也不能仅因寄存器相似就接受。
 
-- `iim42622.h` — 稳定 C ABI。不透明句柄 `dart_iim42622_t`、配置/样本结构体和
-  `dart_iim42622_status_t`，只有固定宽度整数、指针和显式 POD，无厂商头文件。
-- `iim42622.c` — 驱动实现，是本仓库**唯一**包含 K230 SDK 厂商头
-  （`drv_spi.h`）的翻译单元。负责 SPI 实例生命周期与传输、受支持 IMU 的寄存器配置
-  （WHO_AM_I / PWR_MGMT0 / GYRO_CONFIG0 / ACCEL_CONFIG0 / TEMP_DATA1 突发读）、量程灵敏度换算、饱和标志和单调时钟
-  时间戳；厂商返回码与总线错误在这里被归一成自有状态码。
+初始化依据本机下载目录的 IIM-42652 DS-000440 rev 1.1：
 
-使用 **SPI mode 3**；片选由 K230 SPI HAL 管理。保留历史 `iim42622` 文件名与接口名，
-按 WHO_AM_I 区分 `0x46`（ICM-42622-P）和 `0x6f`（IIM-42652），其他 ID 仍拒绝初始化。
-`dart_iim42622_device_name()` 返回实际识别的型号。新板重新连接后实测 ID 为 `0x6f`。
+1. 可选首次访问前等待，选择 Bank 0，读取 WHO_AM_I。
+2. 软复位，等待 2 ms（手册要求至少 1 ms 内不访问任何寄存器），复核 ID 并保存状态。
+3. 在休眠时读取 Bank 1 SENSOR_CONFIG0，检查陀螺仪轴禁止位 5:3；恢复 Bank 0。
+   不改写其他型号相关的保留位。配置量程/ODR，再使能加速度计和陀螺仪低噪声模式。
+4. 默认等待 50 ms；期间不写寄存器，满足使能后至少 200 µs 不写的要求。
+   陀螺仪启动时间是典型 30 ms，无最大值保证；45 ms 是最短保持开启时间。
+5. 读回配置，并在有界期限内每 5 ms 读取状态和原始数据。只有加速度计、陀螺仪
+   六轴均不为无效标记 -32768，且整帧非全零、非全 `ff` 才成功；
+   DATA_RDY 本身不能证明陀螺仪有效。
+   默认额外等待最多 1000 ms，否则返回 READY_TIMEOUT，释放句柄且保留诊断。
 
-IIM-42652 的寄存器和换算依据 TDK 的 [DS-000440 v1.0](https://cdn.sparkfun.com/assets/4/2/e/d/c/IIM-42652_Datasheet.pdf)：
-软复位后等待 2 ms，在休眠状态设置量程/ODR，再开启低噪声模式并等待 50 ms；
-读回电源和量程/ODR 寄存器确认配置生效，再允许采样。该顺序满足开启后 200 µs 内
-不写寄存器的要求，也覆盖陀螺仪启动时间。温度按 `raw / 132.48 + 25` 换算。
+`pre_access_delay_ms` / `post_enable_delay_ms` / `ready_timeout_ms` 为零时分别选用
+0 / 50 / 1000 ms。使能后等待不可设为低于 50 ms 的非零值；这些参数可用于延时对照，
+不是芯片手册保证的最大启动时间。`timeout_ms` 目前只校验非零，SDK 同步 SPI 调用
+没有可用的每次传输超时参数；就绪超时不能中断一个尚未返回的底层 SPI 调用。
 
-C++ 侧（`IImu` 抽象、`Estimator` 估计器、`k230::Iim42622` 适配器）都在 `../imu/`，
-适配器是唯一同时包含 `imu/interface.cpp` 与 `spi/iim42622.h` 的地方。
+诊断包含阶段、C 返回码、各阶段的 CLOCK_MONOTONIC 绝对时间、轮询次数、
+INT_STATUS 最后值及所有观察值的按位或（该寄存器读后清除）、轴禁止配置、
+最后一次原始样本和逐字节陀螺仪读取结果。成功与失败均输出至应用状态日志。
+`nanosleep` 被 EINTR 打断后继续等待剩余时间；进程被终止后仍须重新完整初始化。
 
-## 构建
+诊断时可设 `skip_device_id_check=1`（应用参数 `--imu-ignore-id on`），绕过复位前后的
+ID 值校验，实际读到的 ID 仍记录，传输失败仍返回错误。在首次 ID 读取之前、使能等待
+之后以及就绪轮询时读取 Bank 0 `0x1d..0x2a` 的 14 字节；日志 `op=raw_probe`
+保存最后一次成功读取的原始字节和阶段，即使后续配置检查失败也可查看。
+这些寄存器快照标记为 `verification=unverified`。配置、轴禁止位和有效样本检查仍生效，
+不会把全 `ff` / 全零视作初始化成功；绕过模式下后续采样遇到这种整帧也返回总线错误。
+默认不开启此选项，它不能替代芯片型号验证或修复无响应的 SPI 总线。
 
-`DART_IMU_K230`（在 `include/CMakeLists.txt` 的 spi 一节声明）打开时才把驱动编成
-`dart_iim42622`，并且要求 RISC-V 交叉工具链存在，否则直接 FATAL_ERROR。
+50 ms 固定等待和配置读回本身不能证明硬件就绪。即使初始化成功，量程、偏置、
+标定和运动估计仍需独立验证。温度换算为 `raw / 132.48 + 25`。
+
+C++ 的 IImu、Estimator 和 k230::Iim42652 适配器在 `../imu/`。
+`DART_IMU_K230=ON` 时交叉构建 dart_iim42652 和 dart_imu_k230；主机 imu_driver
+测试使用假 HAL、单调时钟及中断等待，覆盖就绪超时、部分轴无效、配置错误和清理。
+
+板端有限诊断程序：
 
 ```bash
-cmake --preset cross   # DART_IMU_K230=ON，编出 dart_iim42622 + dart_imu_k230
-cmake --preset host    # K230 关闭：只有纯 C++ 的 dart_imu（estimator）
+cmake --build build-cross --target imu_init_probe
+# 板端执行，必须先停止其他 IMU/SPI 使用者：
+/sdcard/app/imu_init_probe /sdcard/app/logs/imu_init_probe.log
 ```
+
+每组重复两次：原 50 ms、首次访问前加 200 ms、使能后 200 ms、两者 200 ms、
+使能后 1000 ms；各组额外就绪等待均为 1000 ms。程序不启动相机，按行刷新诊断日志。

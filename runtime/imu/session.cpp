@@ -2,11 +2,15 @@
 #define DART_RUNTIME_IMU_SESSION_CPP
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -44,8 +48,9 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
-    /* One run per instance. The application may request an initial stationary
-     * seed; reset() never silently seeds again. Paths must already have parents. */
+    /* One run per instance. Each start creates a numbered file from the path base.
+     * Parents must exist. The application may request an initial stationary seed;
+     * reset() never silently seeds again. */
     bool start(
         const char* path, std::uint32_t period_us = 1000, bool initial_seed = false,
         std::uint64_t log_limit_bytes = kDefaultLogLimitBytes) noexcept;
@@ -54,6 +59,7 @@ public:
     Estimator::SeedResult seed(const Quaternionf& sensor_to_reference) noexcept;
     void reset() noexcept;
     Stats stats() const noexcept;
+    const char* log_path() const noexcept { return log_path_; }
 
 private:
     enum class EventKind { kSample, kSeed, kReset, kReadError };
@@ -83,6 +89,7 @@ private:
     void writer_loop() noexcept;
     bool write_event(const Event& event) noexcept;
     bool write_log(const char* data, int length, std::size_t capacity) noexcept;
+    bool open_log(const char* base_path) noexcept;
     static void* sample_entry(void* context) noexcept {
         static_cast<Session*>(context)->sample_loop();
         return nullptr;
@@ -112,12 +119,117 @@ private:
     pthread_t sample_thread_{}, writer_thread_{};
     bool sample_started_ = false, writer_started_ = false, used_ = false;
     std::FILE* file_ = nullptr;
+    char log_path_[512]{};
     std::atomic<std::uint64_t> samples_{0}, read_errors_{0}, written_{0}, dropped_{0},
         io_errors_{0};
     std::atomic<std::uint64_t> log_bytes_{0};
     std::atomic<bool> log_limit_reached_{false};
     std::uint64_t log_limit_bytes_ = kDefaultLogLimitBytes;
 };
+
+inline bool Session::open_log(const char* base_path) noexcept {
+    const auto length = std::strlen(base_path);
+    if (length >= sizeof(log_path_)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    struct stat existing{};
+    if (::stat(base_path, &existing) == 0) {
+        if (!S_ISREG(existing.st_mode)) {
+            errno = EINVAL;
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        return false;
+    }
+    const char* slash = std::strrchr(base_path, '/');
+    const char* name = slash == nullptr ? base_path : slash + 1;
+    if (name[0] == '\0' || std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0) {
+        errno = EINVAL;
+        return false;
+    }
+    const char* extension = std::strrchr(name, '.');
+    if (extension == name)
+        extension = nullptr;
+    const char* suffix = extension == nullptr ? ".log" : extension;
+    const auto stem_length = extension == nullptr
+        ? length
+        : static_cast<std::size_t>(extension - base_path);
+    const auto name_stem_length = stem_length - static_cast<std::size_t>(name - base_path);
+    if (stem_length + 7 + std::strlen(suffix) >= sizeof(log_path_)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    char directory[sizeof(log_path_)] = ".";
+    if (slash != nullptr) {
+        const auto size = slash == base_path ? 1U : static_cast<std::size_t>(slash - base_path);
+        std::memcpy(directory, base_path, size);
+        directory[size] = '\0';
+    }
+    DIR* entries = ::opendir(directory);
+    if (entries == nullptr)
+        return false;
+    unsigned newest = 0;
+    for (;;) {
+        errno = 0;
+        const auto* entry = ::readdir(entries);
+        if (entry == nullptr) {
+            const int saved = errno;
+            if (::closedir(entries) != 0)
+                return false;
+            if (saved != 0) {
+                errno = saved;
+                return false;
+            }
+            break;
+        }
+        const char* candidate = entry->d_name;
+        if (std::strlen(candidate) != name_stem_length + 7 + std::strlen(suffix)
+            || std::memcmp(candidate, name, name_stem_length) != 0
+            || candidate[name_stem_length] != '_'
+            || std::strcmp(candidate + name_stem_length + 7, suffix) != 0)
+            continue;
+        unsigned number = 0;
+        for (std::size_t i = name_stem_length + 1; i < name_stem_length + 7; ++i) {
+            if (candidate[i] < '0' || candidate[i] > '9') {
+                number = 0;
+                break;
+            }
+            number = number * 10U + static_cast<unsigned>(candidate[i] - '0');
+        }
+        if (number > newest)
+            newest = number;
+    }
+    // Exclusive creation also protects against another process choosing the same number.
+    unsigned number = newest + 1;
+    for (; number <= 999999; ++number) {
+        const int size = std::snprintf(
+            log_path_, sizeof(log_path_), "%.*s_%06u%s",
+            static_cast<int>(stem_length), base_path, number, suffix);
+        if (size < 0 || static_cast<std::size_t>(size) >= sizeof(log_path_)) {
+            errno = ENAMETOOLONG;
+            break;
+        }
+        const int fd = ::open(log_path_, O_WRONLY | O_CREAT | O_EXCL, 0666);
+        if (fd < 0) {
+            if (errno == EEXIST)
+                continue;
+            break;
+        }
+        file_ = ::fdopen(fd, "w");
+        if (file_ != nullptr)
+            return true;
+        const int saved = errno;
+        ::close(fd);
+        ::unlink(log_path_);
+        errno = saved;
+        break;
+    }
+    if (number > 999999)
+        errno = ENOSPC;
+    log_path_[0] = '\0';
+    return false;
+}
 
 inline bool Session::start(
     const char* path, std::uint32_t period_us, bool initial_seed,
@@ -127,8 +239,7 @@ inline bool Session::start(
     queue_.reset(new (std::nothrow) Event[kQueueCapacity]);
     if (!queue_)
         return false;
-    file_ = std::fopen(path, "a");
-    if (file_ == nullptr)
+    if (!open_log(path))
         return false;
     struct stat file_status{};
     if (::fstat(::fileno(file_), &file_status) != 0 || file_status.st_size < 0) {
@@ -414,7 +525,7 @@ inline bool Session::write_log(const char* data, int length, std::size_t capacit
         return false;
     const auto bytes = static_cast<std::uint64_t>(length);
     const auto used = log_bytes_.load();
-    // The cap applies across application restarts; preserve existing data.
+    // Each session owns a new file and an independent budget.
     if (used >= log_limit_bytes_ || bytes > log_limit_bytes_ - used) {
         log_limit_reached_.store(true);
         return false;

@@ -18,7 +18,8 @@ inline int run_capture(
     platform::RunControl control{args.seconds};
     logging::Logger log;
     (void)log.open(args.log_path);
-    const platform::ImuOptions options{args.imu_on, args.imu_bus, args.imu_cs, args.imu_log};
+    const platform::ImuOptions options{
+        args.imu_on, args.imu_bus, args.imu_cs, args.imu_log, args.imu_ignore_id};
     return run_imu(options, log, [&](imu::Session* session) noexcept {
         return run_services(args, camera_factory, control, log, session);
     });

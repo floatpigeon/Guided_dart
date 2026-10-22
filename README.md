@@ -37,7 +37,7 @@
 | `include/firmware/src/recorder/` | 录像队列、线程、逐帧 PNG 与旧 PGM/PBM 流 | `dart_recording`（INTERFACE，包含类 `.cpp`） |
 | `runtime/imu/` | 独立 IMU 采样、上层共用的积分状态和异步原始/积分日志 | `dart_imu_logging`（INTERFACE，包含类 `.cpp`） |
 | `include/firmware/src/camera/` | L3 帧数据/相机抽象 + L2/C 数据面实现 | `dart_camera_types` / `dart_camera_core` / `dart_camera_k230` / `dart_camera_acl` |
-| `include/firmware/src/{imu,spi}/` | IMU 抽象/估计器 + SPI 驱动 + K230 适配器 | `dart_imu` / `dart_iim42622` / `dart_imu_k230` |
+| `include/firmware/src/{imu,spi}/` | IMU 抽象/估计器 + SPI 驱动 + K230 适配器 | `dart_imu` / `dart_iim42652` / `dart_imu_k230` |
 | `include/firmware/src/{board,system,logging,storage}/` | 板级组装、进程资源、日志与目录操作 | `dart_board` / `dart_platform` |
 | `.script/` | 构建、部署、板端清理和相机回归检查；`install-rtos` 可注册短命令 | — |
 | [`tools/`](tools/README.md) | 主机播放器、IMU 日志工具与独立 RAW 相机诊断探针 | 独立构建的工具 |
@@ -87,6 +87,7 @@ dart/
 │   ├── build-rtos                     # 交叉编译（-r 重编 / <目标名> / --host）
 │   ├── deploy-rtos                    # 统一部署入口：SSH/scp、读卡器、USB/MTP
 │   ├── clean-rtos                     # 清空 /sdcard/app（保留目录本身）
+│   ├── clean-rtos-data                # 清除新旧分区的日志与录像，支持 --dry-run
 │   ├── _rtos-common.sh                # 构建/部署/清理共用的定位、环境与板端访问层
 │   ├── deploy-mtp.sh                  # USB/MTP：GIO 上传、备份和 SHA-256 回读校验
 │   ├── check-camera-pool.sh           # 相机资源池与生命周期的 host 回归检查
@@ -160,7 +161,7 @@ bash .script/build-rtos --host       # host 编译检查（不需要工具链，
 
 ## 5. 部署到板子
 
-日常三条短命令（在 `.script/`，用法见 [`.script/README.md`](.script/README.md)）。先做一次
+日常短命令（在 `.script/`，用法见 [`.script/README.md`](.script/README.md)）。先做一次
 PATH 注册，之后就能直接敲、不带 `./`：
 
 ```bash
@@ -170,6 +171,7 @@ source ~/.bashrc                   # 当前终端生效（zsh 用 source ~/.zshr
 build-rtos            # 交叉编译（-r 清 build-cross 重编；<目标名> 只编一个；--host 编译检查）
 deploy-rtos           # 上板 launcher + dart_app + startup_final.list -> /sdcard/app
 clean-rtos            # 清空 /sdcard/app 下的内容（目录本身保留；固件自带的 examples/ 不动）
+clean-rtos-data       # 清除两个分区的日志与录像，跳过写入中的项；--dry-run 可预览
 ```
 
 应用重命名后，首次更新已有板子应运行 `deploy-rtos`，将 `dart_app` 与
@@ -184,7 +186,8 @@ export SDCARD=/media/$USER/<卡>   # 读卡器：直接写已挂载的 SD 卡
 export SDCARD='gphoto2://Kendryte_CanMV_001000000/store_ffff0001'   # 板子用 USB 挂着（MTP）
 ```
 
-`store_ffff0001` = 板端 `/sdcard`（要部署的目标），`store_ffff0002` = `/data`；
+`store_ffff0001` = 板端 `/sdcard`（程序与清单），`store_ffff0002` = `/data`（日志与录像）；
+脚本按两个分区分别操作，数据地址可通过 `DATA_SDCARD` 覆盖。
 MTP 部署会检查分区根目录的 `revision.txt`；缺少时须有已部署的 launcher 与清单，否则
 拒绝写入。地址写进 `.script/board.env` 更省事：
 `cp .script/board.env.example .script/board.env`（该文件已被 gitignore）。
@@ -203,8 +206,8 @@ SHA-256，再改名替换并再次校验；日志和录像保留。官方
 BOARD_IP=192.168.1.100 bash .script/deploy-rtos              # 两个 ELF + 清单
 BOARD_IP=192.168.1.100 bash .script/deploy-rtos dart_app     # 只推一个目标
 
-# 读卡器：全量部署默认清理日志与录像，--keep-logs 可保留
-SDCARD="/media/$USER/SDCARD" bash .script/deploy-rtos --keep-logs
+# 读卡器：同时挂载程序和数据分区；全量部署默认清日志与录像，--keep-logs 可保留
+SDCARD="/media/$USER/SDCARD" DATA_SDCARD="/media/$USER/DATA" bash .script/deploy-rtos --keep-logs
 SDCARD="/media/$USER/SDCARD" bash .script/deploy-rtos dart_app
 
 # USB/MTP：默认板子无需配置；其它 URI 也可通过 SDCARD 指定

@@ -1,4 +1,6 @@
+#include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -15,6 +17,18 @@
 #include "runtime/imu/session.cpp"
 
 namespace dart::tests {
+
+static std::atomic<bool> fail_log_writes{false};
+
+extern "C" std::size_t __real_fwrite(const void*, std::size_t, std::size_t, std::FILE*);
+extern "C" std::size_t
+__wrap_fwrite(const void* data, std::size_t size, std::size_t count, std::FILE* file) {
+    if (fail_log_writes.load()) {
+        errno = ENOSPC;
+        return 0;
+    }
+    return __real_fwrite(data, size, count, file);
+}
 
 class ImuSessionTest final {
     class Source final : public imu::IImu {
@@ -64,6 +78,12 @@ class ImuSessionTest final {
                 return fields;
             begin = end + 1;
         }
+    }
+
+    static std::string read(const std::filesystem::path& path) {
+        std::ifstream input{path};
+        assert(input);
+        return {std::istreambuf_iterator<char>{input}, {}};
     }
 
     static void verify(const std::map<std::string, std::string>& row, const Expected& expected) {
@@ -120,6 +140,8 @@ public:
         char directory[] = "/tmp/dart-imu-session-XXXXXX";
         assert(::mkdtemp(directory) != nullptr);
         const auto path = std::filesystem::path{directory} / "imu.log";
+        const std::string legacy = "previous boot log; do not append or overwrite\n";
+        std::ofstream{path} << legacy;
         Source source;
         imu::Session session{source};
         assert(!session.current().has_reference_frame);
@@ -127,6 +149,7 @@ public:
         assert(!session.start(path.c_str(), 0));
         assert(!session.start(directory));
         assert(session.start(path.c_str()));
+        assert(std::filesystem::path{session.log_path()} == path.parent_path() / "imu_000001.log");
         for (int i = 0; i < 500 && session.stats().read_errors == 0; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         assert(session.stats().read_errors > 0);
@@ -206,7 +229,7 @@ public:
         assert(stats.read_errors > 0);
         assert(stats.written == expected.size() + stats.read_errors);
 
-        std::ifstream input{path};
+        std::ifstream input{session.log_path()};
         std::string line;
         assert(std::getline(input, line) && line.find("# imu_log version=1") == 0);
         assert(std::getline(input, line));
@@ -236,6 +259,8 @@ public:
             verify(row, expected[next++]);
         }
         assert(footer && next == expected.size());
+        assert(read(path) == legacy);
+        const auto first_log = read(session.log_path());
 
         // Startup seed is a one-time request. Reset must wait for a new command.
         Source initial_source;
@@ -245,6 +270,7 @@ public:
         initial_source.push(sample);
         imu::Session initial{initial_source};
         assert(initial.start(path.c_str(), 1000, true));
+        assert(std::filesystem::path{initial.log_path()} == path.parent_path() / "imu_000002.log");
         for (int i = 0; i < 500 && !initial.current().has_reference_frame; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         assert(initial.current().generation == 1);
@@ -252,6 +278,8 @@ public:
         sample.timestamp_ns += 10'000'000;
         assert(!feed(initial, initial_source, sample).has_reference_frame);
         initial.stop();
+        assert(read(session.log_path()) == first_log);
+        assert(read(initial.log_path()).starts_with("# imu_log version=1"));
 
         // Reaching the disk budget must leave sampling and estimation running.
         const auto limited_path = std::filesystem::path{directory} / "limited.log";
@@ -269,25 +297,74 @@ public:
         assert(limited.seed({}).accepted);
         limited.stop();
         assert(limited.stats().io_errors == 0 && limited.stats().dropped > 0);
-        const auto capped_size = std::filesystem::file_size(limited_path);
+        const auto capped_size = std::filesystem::file_size(limited.log_path());
         assert(capped_size <= limit && capped_size == limited.stats().log_bytes);
 
-        // Existing logs are preserved and count against the next run's budget.
-        std::ifstream preserved_input{limited_path};
-        const std::string preserved{std::istreambuf_iterator<char>{preserved_input}, {}};
+        // A new boot gets its own budget; a capped old file is never reopened.
+        const auto preserved = read(limited.log_path());
         imu::Session resumed{limited_source};
-        assert(resumed.start(limited_path.c_str(), 1000, false, capped_size));
-        assert(resumed.stats().log_limit_reached);
+        assert(resumed.start(limited_path.c_str(), 10'000, false, limit));
+        assert(std::filesystem::path{resumed.log_path()} == path.parent_path() / "limited_000002.log");
+        assert(!resumed.stats().log_limit_reached);
         sample.timestamp_ns += 10'000'000;
         assert(feed(resumed, limited_source, sample).sample_accepted);
         resumed.stop();
-        std::ifstream resumed_input{limited_path};
-        const std::string after_resume{std::istreambuf_iterator<char>{resumed_input}, {}};
-        assert(preserved == after_resume);
-        assert(resumed.stats().io_errors == 0 && resumed.stats().written == 0);
+        assert(read(limited.log_path()) == preserved);
+        assert(resumed.stats().io_errors == 0 && resumed.stats().written > 0);
+        assert(resumed.stats().log_bytes <= limit);
+
+        // Holes, unrelated names, and interrupted empty files cannot reuse an old number.
+        const auto occupied = path.parent_path() / "imu_000010.log";
+        std::ofstream{occupied};
+        std::ofstream{path.parent_path() / "imu_000999.log.bak"};
+        imu::Session later{source};
+        assert(later.start(path.c_str()));
+        assert(std::filesystem::path{later.log_path()} == path.parent_path() / "imu_000011.log");
+        later.stop();
+        assert(std::filesystem::file_size(occupied) == 0);
+        assert(read(session.log_path()) == first_log && read(path) == legacy);
+
+        // Concurrent creators must reserve different files without truncating either one.
+        Source other_source;
+        imu::Session concurrent_a{source}, concurrent_b{other_source};
+        std::atomic<bool> go{false};
+        const auto create = [&](imu::Session& current) {
+            while (!go.load())
+                std::this_thread::yield();
+            assert(current.start(path.c_str()));
+        };
+        std::thread a{[&] { create(concurrent_a); }};
+        std::thread b{[&] { create(concurrent_b); }};
+        go.store(true);
+        a.join();
+        b.join();
+        assert(std::strcmp(concurrent_a.log_path(), concurrent_b.log_path()) != 0);
+        concurrent_a.stop();
+        concurrent_b.stop();
+        assert(read(concurrent_a.log_path()).starts_with("# imu_log version=1"));
+        assert(read(concurrent_b.log_path()).starts_with("# imu_log version=1"));
+
+        imu::Session no_extension{source}, custom_extension{source};
+        assert(no_extension.start((path.parent_path() / "raw").c_str()));
+        assert(std::filesystem::path{no_extension.log_path()} == path.parent_path() / "raw_000001.log");
+        no_extension.stop();
+        assert(custom_extension.start((path.parent_path() / "raw.csv").c_str()));
+        assert(std::filesystem::path{custom_extension.log_path()} == path.parent_path() / "raw_000001.csv");
+        custom_extension.stop();
+
+        imu::Session invalid_path{source};
+        assert(!invalid_path.start((std::string(directory) + '/').c_str()));
+        assert(!invalid_path.start((path.parent_path() / "missing/imu.log").c_str()));
+        assert(!invalid_path.start(std::string(512, 'x').c_str()));
+        const auto exhausted_path = path.parent_path() / "full.log";
+        std::ofstream{path.parent_path() / "full_999999.log"} << legacy;
+        assert(!invalid_path.start(exhausted_path.c_str()));
+        assert(read(path.parent_path() / "full_999999.log") == legacy);
 
         imu::Session full{source};
-        assert(!full.start("/dev/full"));
+        fail_log_writes.store(true);
+        assert(!full.start((path.parent_path() / "disk-error.log").c_str()));
+        fail_log_writes.store(false);
         assert(full.stats().io_errors > 0);
         std::filesystem::remove_all(directory);
     }

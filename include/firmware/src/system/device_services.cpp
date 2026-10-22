@@ -18,6 +18,7 @@ struct ImuOptions {
     int bus = -1;
     int chip_select = -2;
     const char* log_path = nullptr;
+    bool ignore_device_id = false;
 };
 
 } // namespace dart::platform

@@ -9,6 +9,15 @@ file(GLOB_RECURSE _imu_runtime_classes CONFIGURE_DEPENDS "imu/*.cpp")
 add_library(dart_imu_logging_checks OBJECT ${_imu_runtime_classes})
 target_link_libraries(dart_imu_logging_checks PRIVATE dart_imu_logging)
 
+# Finite board diagnostic for initialization timing comparisons. Run alone.
+if(DART_IMU_K230)
+    add_executable(imu_init_probe imu/init_probe.c)
+    target_compile_options(imu_init_probe PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(imu_init_probe PRIVATE dart_iim42652 k230_rtos_app m)
+    set_target_properties(imu_init_probe PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/imu_init_probe")
+endif()
+
 # ---------------------------------------------------------------------------
 # launcher：开机自启动器（平台无关）
 #

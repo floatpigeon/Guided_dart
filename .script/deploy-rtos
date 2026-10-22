@@ -17,6 +17,7 @@
 #                                    -> 板子用 USB 挂着（MTP/gphoto2）= 板端 /sdcard
 #   均未设置时默认使用上面的 USB 地址，无需 export。
 #   可选: BOARD_USER(默认 root)、BOARD_DIR(默认 /sdcard/app)
+#         DATA_SDCARD（数据分区挂载点或 URI）、BOARD_DATA_DIR（默认 /data/app）
 #         DART_BUILD_DIR（默认 build-cross；兼容旧变量 BUILD_DIR）
 #   也可以写进 .script/board.env（见 .script/board.env.example）
 #
@@ -64,40 +65,22 @@ for src in "${SOURCES[@]}"; do
     [[ -s "${src}" ]] || die "缺少非空产物: ${src}；先跑 build-rtos"
 done
 
-# MTP 始终走原生 GIO URI；不再经过读卡器脚本或向 GVfs FUSE 路径写文件。
-if [[ -z "${BOARD_IP:-}" ]]; then
-    SDCARD="${SDCARD:-gphoto2://Kendryte_CanMV_001000000/store_ffff0001}"
-    MTP_URI=''
-    LOCAL_PATH="$(rtos_resolve_local_path "${SDCARD}")"
-    case "${SDCARD}" in
-    gphoto2://* | mtp://*) MTP_URI="${SDCARD%/}" ;;
-    *)
-        if [[ "${LOCAL_PATH}" == */gvfs/* ]]; then
-            command -v gio >/dev/null || die "找不到 gio"
-            MTP_URI="$(LC_ALL=C gio info "${LOCAL_PATH}" | sed -n 's/^uri: //p')"
-            [[ -n "${MTP_URI}" ]] || die "无法取得 MTP URI: ${LOCAL_PATH}"
-        fi
-        ;;
-    esac
-    if [[ -n "${MTP_URI}" ]]; then
-        command -v gio >/dev/null || die "找不到 gio"
-        if ! gio info "${MTP_URI}" >/dev/null 2>&1; then
-            MTP_DEVICE="${MTP_URI#*://}"
-            MTP_DEVICE="${MTP_URI%%://*}://${MTP_DEVICE%%/*}/"
-            gio mount "${MTP_DEVICE}" || die "无法挂载 USB 板子，请连接并启动 CanMV 后重试"
-        fi
-        MTP_ARGS=()
-        [[ -z "${TARGET}" ]] || MTP_ARGS+=(--only "${TARGET}")
-        exec bash "${SCRIPT_DIR}/deploy-mtp.sh" "${MTP_URI}" "${MTP_ARGS[@]}"
-    fi
-fi
-
-command -v md5sum >/dev/null || die "找不到 md5sum"
 rtos_resolve_transport
+# 全量部署同时检查数据分区，避免文件替换后才发现 /data 不可访问。
+[[ -n "${TARGET}" ]] || rtos_resolve_data_transport
+if [[ "${RTOS_MODE}" == mtp ]]; then
+    MTP_ARGS=()
+    [[ -z "${TARGET}" ]] || MTP_ARGS+=(--only "${TARGET}")
+    exec bash "${SCRIPT_DIR}/deploy-mtp.sh" "${RTOS_DIR}" "${MTP_ARGS[@]}"
+fi
+command -v md5sum >/dev/null || die "找不到 md5sum"
 
 deploy_network() {
     command -v scp >/dev/null || die "找不到 scp"
-    rtos_ssh "mkdir -p '${RTOS_DIR}/logs' '${RTOS_DIR}/records'"
+    rtos_ssh "mkdir -p '${RTOS_DIR}'"
+    if [[ -z "${TARGET}" ]]; then
+        rtos_ssh "mkdir -p '${RTOS_DATA_DIR}/logs' '${RTOS_DATA_DIR}/records'"
+    fi
     local i dst local_md5 remote_md5
     for i in "${!NAMES[@]}"; do
         dst="${RTOS_DIR}/${NAMES[i]}"
@@ -159,11 +142,10 @@ deploy_card() {
     done
 
     if [[ -z "${TARGET}" ]]; then
-        mkdir -p "${RTOS_DIR}/logs" "${RTOS_DIR}/records"
+        mkdir -p "${RTOS_DATA_DIR}/logs" "${RTOS_DATA_DIR}/records"
         if [[ "${KEEP_LOGS}" == 0 ]]; then
-            rm -f -- "${RTOS_DIR}"/logs/*.log "${RTOS_DIR}"/logs/*.pid
-            rm -rf -- "${RTOS_DIR}"/records/*
-            info "已清理日志与录像（--keep-logs 可保留）"
+            bash "${SCRIPT_DIR}/clean-rtos-data"
+            info "已清理新旧分区的日志与录像（--keep-logs 可保留）"
         fi
     fi
     sync

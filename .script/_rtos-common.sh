@@ -1,31 +1,8 @@
 #!/usr/bin/env bash
-# ============================================================================
-# .script/ 构建、部署和清理脚本共用的
-# 定位、环境加载与板端访问逻辑。**不直接执行，只被 source。**
-#
-# 提供:
-#   REPO_ROOT                 仓库根目录（由调用脚本的路径反推，与当前 cwd 无关）
-#   BOARD_USER / BOARD_DIR    板端用户 / 部署目录（默认 root / /sdcard/app）
-#   RTOS_MODE / RTOS_TARGET   传输方式（scp|card）与其目标（板子 IP 或卡/挂载点）
-#   RTOS_MTP                  1 = 目标是板子的 MTP/gphoto2 挂载（不是真读卡器）
-#   RTOS_DIR                  实际使用的部署目录（card 模式下解析成卡上的 app 目录）
-#
-#   rtos_resolve_transport    解析传输方式；带连通性/目录预检，失败即 die
-#   rtos_resolve_local_path   gphoto2://… / mtp://… / file://… -> 本地路径
-#   rtos_find_mtp_sdcard      找出板子 MTP 挂载里对应 /sdcard 的 store（判据：根目录有 revision.txt）
-#   rtos_ssh <cmd...>         在板子上执行命令（card 模式下拒绝）
-#   rtos_remove <path...>     删除板端/卡上的路径（两种模式通用）
-#   rtos_list_children <dir>  列出目录下条目名（不含 . 与 ..；兼容多列输出）
-#   rtos_artifact_path <目标> 根据构建目录配置返回产物绝对路径
-#   info / warn / die         统一输出（支持 NO_COLOR）
-#
-# 环境变量（都没设置时请看 .script/board.env.example）:
-#   BOARD_IP    板子 IP；设置后走 ssh/scp 模式
-#   SDCARD      卡挂载点、app 目录，或板子 MTP 的 URI/挂载路径；BOARD_IP 未设置时用它
-#   BOARD_USER  ssh 用户（默认 root）
-#   BOARD_DIR   板端部署目录（默认 /sdcard/app）
-# 也可把上面几个写进 .script/board.env（本文件会自动读取，且不覆盖已有环境变量）。
-# ============================================================================
+# 构建/部署/清理共用的定位、配置和存储访问层；只被 source。
+# 程序默认 /sdcard/app，数据默认 /data/app。
+# BOARD_IP 选择 SSH；否则 SDCARD / DATA_SDCARD 选择 MTP URI 或读卡器分区。
+# MTP 始终通过 GIO 操作；rtos_list_entries 不跟随符号链接。
 
 RTOS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
 REPO_ROOT="$(cd "${RTOS_SCRIPT_DIR}/.." && pwd)"
@@ -66,26 +43,21 @@ fi
 
 BOARD_USER="${BOARD_USER:-root}"
 BOARD_DIR="${BOARD_DIR:-/sdcard/app}"
+BOARD_DATA_DIR="${BOARD_DATA_DIR:-/data/app}"
 
 rtos_usage_env() {
     cat <<'EOF'
-需要先告诉脚本板子在哪（三选一）:
-
-  export BOARD_IP=192.168.1.100     # 网络模式：ssh/scp
-  export SDCARD=/media/$USER/<卡>   # 读卡器模式：直接写已挂载的 SD 卡
-  export SDCARD='gphoto2://Kendryte_CanMV_001000000/store_ffff0001'
-                                    # 板子用 USB 挂着（MTP/gphoto2），store_ffff0001 = 板端 /sdcard
-
-MTP 挂载点也可以直接填本地路径：
-  export SDCARD=/run/user/1000/gvfs/gphoto2:host=Kendryte_CanMV_001000000/store_ffff0001
-
-也可以把上面几行写进 .script/board.env（见 .script/board.env.example）。
-可选：BOARD_USER（默认 root）、BOARD_DIR（默认 /sdcard/app）。
+默认使用 USB/MTP 板子，也可在环境变量或 .script/board.env 配置：
+  BOARD_IP=192.168.1.100       # SSH/scp（优先）
+  SDCARD=/media/$USER/SDCARD   # /sdcard 分区的挂载点或 app 目录
+  DATA_SDCARD=/media/$USER/DATA # /data 分区的挂载点或 app 目录
+  SDCARD=gphoto2://Kendryte_CanMV_001000000/store_ffff0001
+  DATA_SDCARD=gphoto2://Kendryte_CanMV_001000000/store_ffff0002
+可选：BOARD_USER=root、BOARD_DIR=/sdcard/app、BOARD_DATA_DIR=/data/app。
+读卡器全量部署或清理数据时需要同时指定 DATA_SDCARD。
 EOF
 }
 
-# 把 gphoto2://<host>/<store> / mtp://<host>/<store> / file:///path 解析成本地路径。
-# 注意：gvfs 的目录名里带冒号（gphoto2:host=...），所以这里必须整段当字符串处理。
 rtos_resolve_local_path() {
     local p="$1" scheme host rest sub runtime
     case "${p}" in
@@ -97,154 +69,328 @@ rtos_resolve_local_path() {
         [[ "${rest}" == */* ]] && sub="${rest#*/}"
         runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
         p="${runtime}/gvfs/${scheme}:host=${host}"
-        [[ -n "${sub}" ]] && p="${p}/${sub}"
+        [[ -z "${sub}" ]] || p="${p}/${sub}"
         ;;
     file://*) p="${p#file://}" ;;
     esac
     printf '%s' "${p}"
 }
 
-# 板子以 MTP 挂着时，帮用户把 /sdcard 对应的 store 找出来：
-# 判据是根目录有 revision.txt —— 固件构建只把 revision.txt 写进 SDCARD 分区
-# （kRTOSSDK tools/gen_image.sh / boards/*/genimage-sdcard.cfg），
-# 且 MTP 里 /sdcard 先于 /data 注册，所以它就是 store_ffff0001。
-rtos_find_mtp_sdcard() {
-    local runtime base host store
-    runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-    base="${runtime}/gvfs"
-    [[ -d "${base}" ]] || return 0
-    for host in "${base}"/*:host=*; do
-        [[ -d "${host}" ]] || continue
-        for store in "${host}"/*; do
-            [[ -d "${store}" ]] || continue
-            if [[ -f "${store}/revision.txt" ]]; then
-                printf '%s' "${store}"
-                return 0
-            fi
-        done
-    done
+# 将分区根或应用目录转换为统一位置；URI 始终由 GIO 操作，不写 GVfs FUSE。
+# 输出 RTOS_LOCATION / RTOS_STORE。
+rtos_storage_location() {
+    local given="${1%/}" mount="$2" board_dir="${3%/}" relative rest host store
+    [[ "${board_dir}" == "/${mount}/"* ]] || die "板端目录必须位于 /${mount}/ 下：${board_dir}"
+    rtos_assert_safe_path "${board_dir}"
+    relative="${board_dir#"/${mount}/"}"
+    if [[ "${given}" == */gvfs/* ]]; then
+        command -v gio >/dev/null || die "找不到 gio"
+        given="$(LC_ALL=C gio info "${given}" | sed -n 's/^uri: //p')"
+        [[ -n "${given}" ]] || die "无法取得 MTP URI"
+        given="${given%/}"
+    fi
+    case "${given}" in
+    gphoto2://* | mtp://*)
+        rest="${given#*://}"
+        host="${rest%%/*}"
+        [[ "${rest}" == */* && -n "${host}" ]] || die "需要存储根 URI：${given}"
+        rest="${rest#*/}"
+        store="${rest%%/*}"
+        [[ "${store}" == store_* ]] || die "需要 MTP store URI：${given}"
+        RTOS_STORE="${given%%://*}://${host}/${store}"
+        [[ "${given}" == "${RTOS_STORE}" || "${given}" == "${RTOS_STORE}/${relative}" ]] ||
+            die "请指定分区根或 ${relative} 目录：${given}"
+        RTOS_LOCATION="${RTOS_STORE}/${relative}"
+        ;;
+    *)
+        given="$(rtos_resolve_local_path "${given}")"
+        rtos_assert_safe_path "${given}"
+        [[ -d "${given}" ]] || die "分区未挂载或目录不存在：${given}"
+        given="$(realpath -e -- "${given}")"
+        if [[ "${given}" == */"${relative}" ]]; then
+            RTOS_STORE="${given%"/${relative}"}"
+        else
+            RTOS_STORE="${given}"
+        fi
+        rtos_assert_safe_path "${RTOS_STORE}"
+        RTOS_LOCATION="${RTOS_STORE}/${relative}"
+        ;;
+    esac
 }
 
-# 解析出 RTOS_MODE / RTOS_TARGET / RTOS_DIR，并做预检。
 rtos_resolve_transport() {
+    RTOS_DATA_DIR=''
+    RTOS_DATA_STORE=''
     if [[ -n "${BOARD_IP:-}" ]]; then
         RTOS_MODE=scp
         RTOS_TARGET="${BOARD_IP}"
         RTOS_DIR="${BOARD_DIR}"
-        [[ "${RTOS_DIR}" == /* ]] || die "BOARD_DIR 必须是绝对路径，当前为 '${RTOS_DIR}'"
-        info "板子: ${BOARD_USER}@${BOARD_IP} 目录: ${RTOS_DIR}  (ssh/scp)"
-        command -v ssh >/dev/null 2>&1 || die "找不到 ssh；改用读卡器模式（export SDCARD=...）"
-        if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "${BOARD_USER}@${RTOS_TARGET}" true 2>/dev/null; then
-            die "连不上 ${BOARD_USER}@${BOARD_IP}（需要免密 ssh）。检查 IP/网络，或改用 export SDCARD=<卡挂载点>"
-        fi
-        return 0
+        rtos_assert_safe_path "${RTOS_DIR}"
+        command -v ssh >/dev/null || die "找不到 ssh"
+        ssh -o ConnectTimeout=5 -o BatchMode=yes "${BOARD_USER}@${RTOS_TARGET}" true ||
+            die "连不上 ${BOARD_USER}@${BOARD_IP}（需要免密 SSH）"
+        info "板子：${BOARD_USER}@${BOARD_IP}；程序目录：${RTOS_DIR}"
+        return
     fi
-
-    if [[ -n "${SDCARD:-}" ]]; then
-        local given="${SDCARD}"
-        SDCARD="$(rtos_resolve_local_path "${SDCARD}")"
+    rtos_storage_location "${SDCARD:-gphoto2://Kendryte_CanMV_001000000/store_ffff0001}" sdcard "${BOARD_DIR}"
+    RTOS_DIR="${RTOS_LOCATION}"
+    RTOS_TARGET="${RTOS_STORE}"
+    RTOS_MTP=0
+    case "${RTOS_TARGET}" in
+    gphoto2://* | mtp://*)
+        RTOS_MODE=mtp
+        RTOS_MTP=1
+        command -v gio >/dev/null || die "找不到 gio"
+        if ! gio info "${RTOS_STORE}" >/dev/null 2>&1; then
+            local device="${RTOS_STORE%/*}/"
+            gio mount "${device}" || die "无法挂载 USB 板子"
+            gio info "${RTOS_STORE}" >/dev/null || die "无法访问存储：${RTOS_STORE}"
+        fi
+        if ! gio info "${RTOS_STORE}/revision.txt" >/dev/null 2>&1; then
+            gio info "${RTOS_DIR}/launcher" >/dev/null 2>&1 &&
+                gio info "${RTOS_DIR}/startup_final.list" >/dev/null 2>&1 ||
+                die "没有 revision.txt 或已部署的 launcher 与清单，无法确认 /sdcard 分区"
+        fi
+        info "USB/MTP 程序目录：${RTOS_DIR}"
+        ;;
+    *)
         RTOS_MODE=card
-        RTOS_TARGET="${SDCARD}"
-        RTOS_MTP=0
-        [[ "${SDCARD}" == */gvfs/* ]] && RTOS_MTP=1
-        if [[ -d "${SDCARD}/app" ]]; then
-            RTOS_DIR="${SDCARD}/app"
-        elif [[ "$(basename "${SDCARD}")" == "app" ]]; then
-            RTOS_DIR="${SDCARD}"
-        else
-            RTOS_DIR="${SDCARD}/app"
-        fi
-        [[ "${SDCARD}" == /* ]] || die "SDCARD 必须是绝对路径，当前为 '${SDCARD}'"
-        [[ "${SDCARD}" != "/" ]] || die "SDCARD 不能是 /（那会把 /app 当成板端目录）"
-        if [[ ! -d "${SDCARD}" ]]; then
-            warn "SDCARD 目录不存在: ${SDCARD}"
-            if [[ "${given}" != "${SDCARD}" ]]; then
-                warn "（由 ${given} 解析而来；MTP 挂着时先用 gio mount -l 看实际 URI）"
-            fi
-            die "先挂载：udisksctl mount -b /dev/sdX2，或确认 gphoto2 挂载点还在"
-        fi
-        if [[ "${RTOS_MTP}" == "1" ]]; then
-            info "板端挂载(MTP/gphoto2): ${SDCARD} -> ${RTOS_DIR}"
-            # 板子同时暴露 /sdcard(store_ffff0001) 与 /data(store_ffff0002)，
-            # 只有 /sdcard 会在启动时被读到。判据：SDCARD 分区根目录有 revision.txt
-            # （见 SDK tools/gen_image.sh 与 boards/*/genimage-sdcard.cfg）。
-            local store_root="${SDCARD}"
-            if [[ "$(basename "${store_root}")" == "app" ]]; then
-                store_root="$(dirname "${store_root}")"
-            fi
-            if [[ -f "${store_root}/revision.txt" ]]; then
-                info "已确认它是板端 /sdcard（分区根目录有 revision.txt）"
-            else
-                warn "注意：${store_root} 根目录没有 revision.txt，它很可能**不是**板端 /sdcard（而是 /data）！"
-                warn "      板子只会从 /sdcard/app/ 读 launcher 与清单，写错地方上电不会生效。"
-                warn "      用 gio mount -l 看挂载 URI，选根目录带 revision.txt 的那个 store。"
-            fi
-            info "MTP 部署使用 GIO URI 上传、SHA-256 回读校验，并保留旧文件备份"
-        else
-            info "SD 卡: ${SDCARD} -> app 目录: ${RTOS_DIR}  (读卡器)"
-        fi
-        return 0
-    fi
-
-    local mtp_hint
-    mtp_hint="$(rtos_find_mtp_sdcard || true)"
-    if [[ -n "${mtp_hint}" ]]; then
-        warn "检测到板子已用 MTP 挂着，/sdcard 应该是: ${mtp_hint}"
-        warn "  export SDCARD='${mtp_hint}'"
-    fi
-    warn "既没有设置 BOARD_IP，也没有设置 SDCARD。"
-    rtos_usage_env >&2
-    exit 2
+        info "读卡器程序目录：${RTOS_DIR}"
+        ;;
+    esac
 }
 
-# 删除前的安全护栏：只允许动绝对路径、拒绝根目录、拒绝 ".."。
+# 数据分区独立于 ELF 所在分区；仅在需要操作数据时解析。
+rtos_resolve_data_transport() {
+    [[ -z "${RTOS_DATA_DIR}" ]] || return 0
+    if [[ "${RTOS_MODE}" == scp ]]; then
+        rtos_assert_safe_path "${BOARD_DATA_DIR}"
+        RTOS_DATA_DIR="${BOARD_DATA_DIR}"
+        [[ "${RTOS_DATA_DIR}" != "${RTOS_DIR}" ]] || die "程序与数据不能指向同一个目录"
+        return
+    fi
+    local data="${DATA_SDCARD:-}" app_store="${RTOS_TARGET}"
+    if [[ -z "${data}" && "${RTOS_MODE}" == mtp ]]; then
+        [[ "${RTOS_TARGET}" == */store_ffff0001 ]] ||
+            die "无法推断 /data 分区，请设置 DATA_SDCARD"
+        data="${RTOS_TARGET%/*}/store_ffff0002"
+    fi
+    [[ -n "${data}" ]] || die "日志/录像在独立的 /data 分区，请设置 DATA_SDCARD（分区挂载点或 app 目录）"
+    rtos_storage_location "${data}" data "${BOARD_DATA_DIR}"
+    RTOS_DATA_DIR="${RTOS_LOCATION}"
+    RTOS_DATA_STORE="${RTOS_STORE}"
+    [[ "${RTOS_DATA_STORE}" != "${app_store}" ]] || die "程序与数据不能指向同一个分区"
+    if [[ "${RTOS_MODE}" == mtp ]]; then
+        [[ "${RTOS_DATA_STORE%/*}" == "${app_store%/*}" ]] || die "数据分区必须来自同一台 MTP 板子"
+        gio info "${RTOS_DATA_STORE}" >/dev/null || die "无法访问 /data 分区，请检查 DATA_SDCARD"
+        if gio info "${RTOS_DATA_STORE}/revision.txt" >/dev/null 2>&1; then
+            die "数据目标含 revision.txt，疑似 /sdcard 分区，请检查 DATA_SDCARD"
+        fi
+    else
+        [[ "${RTOS_DATA_STORE}" != *://* ]] || die "读卡器模式的 DATA_SDCARD 必须是本地挂载点"
+    fi
+    info "数据目录：${RTOS_DATA_DIR}"
+}
+
 rtos_assert_safe_path() {
-    local path="$1"
-    if [[ -z "${path}" ]]; then
-        die "内部错误：空路径"
-    fi
-    if [[ "${path}" != /* ]]; then
-        die "拒绝删除非绝对路径: ${path}"
-    fi
-    if [[ "${path}" == "/" ]]; then
-        die "拒绝删除根目录"
-    fi
-    if [[ "${path}" == *".."* ]]; then
-        die "拒绝删除含 .. 的路径: ${path}"
-    fi
-    return 0
+    local path="$1" checked="$1"
+    case "${checked}" in
+    gphoto2://* | mtp://*)
+        checked="${checked#*://}"
+        checked="/${checked#*/}"
+        ;;
+    esac
+    [[ "${checked}" == /* && "${checked}" != / && "${checked}" != *'..'* &&
+       "${checked}" != *'/./'* && "${checked}" != */. && "${checked}" != *'//'* &&
+       "${checked}" != *"'"* && "${checked}" != *$'\n'* && "${checked}" != *$'\r'* ]] ||
+        die "拒绝不安全的路径：${path}"
 }
 
 rtos_ssh() {
-    [[ "${RTOS_MODE}" == "scp" ]] || die "当前是读卡器模式，不能执行远程命令"
+    [[ "${RTOS_MODE}" == scp ]] || die "当前不是网络模式"
     ssh -o ConnectTimeout=10 "${BOARD_USER}@${RTOS_TARGET}" "$@"
 }
 
-# 删除路径（文件或目录）。两种模式通用；远程只依赖板端 ssh 会话里已有的 rm。
+# 输出：d/f/l<TAB>条目名。保留空格、包含隐藏文件，不跟随符号链接。
+rtos_list_entries() {
+    local dir="$1" listing name size kind path
+    rtos_assert_safe_path "${dir}"
+    if [[ "${RTOS_MODE}" == mtp ]]; then
+        listing="$(LC_ALL=C gio list -h -n -a standard::type "${dir}")" || return 1
+        while IFS=$'\t' read -r name size kind; do
+            [[ -n "${name}" ]] || continue
+            kind="${kind%%$'\t'*}"
+            case "${kind}" in
+            '(directory)') kind=d ;;
+            '(symbolic link)' | '(symlink)') kind=l ;;
+            '(regular)') kind=f ;;
+            *) die "无法识别 MTP 条目类型：${name} ${kind}" ;;
+            esac
+            printf '%s\t%s\n' "${kind}" "${name}"
+        done <<< "${listing}"
+    elif [[ "${RTOS_MODE}" == scp ]]; then
+        rtos_ssh "[ -d '${dir}' ] && [ -r '${dir}' ] && [ ! -L '${dir}' ] || exit 1
+        for p in '${dir}'/* '${dir}'/.[!.]* '${dir}'/..?*; do
+            if [ -L \"\$p\" ]; then k=l
+            elif [ -d \"\$p\" ]; then k=d
+            elif [ -e \"\$p\" ]; then k=f
+            else continue; fi
+            printf '%s\\t%s\\n' \"\$k\" \"\${p##*/}\"
+        done"
+    else
+        [[ -d "${dir}" && ! -L "${dir}" ]] || return 1
+        for path in "${dir}"/* "${dir}"/.[!.]* "${dir}"/..?*; do
+            if [[ -L "${path}" ]]; then kind=l
+            elif [[ -d "${path}" ]]; then kind=d
+            elif [[ -e "${path}" ]]; then kind=f
+            else continue; fi
+            name="${path##*/}"
+            [[ "${name}" != *$'\n'* && "${name}" != *$'\t'* ]] || die "不支持文件名中的换行或制表符"
+            printf '%s\t%s\n' "${kind}" "${name}"
+        done
+    fi
+}
+
+# 从可访问的分区根逐层检查应用目录；不存在返回 1，读取错误返回 2。
+rtos_directory_exists() {
+    local root="$1" dir="$2" relative component entries kind name found
+    relative="${dir#"${root}/"}"
+    while [[ -n "${relative}" ]]; do
+        component="${relative%%/*}"
+        entries="$(rtos_list_entries "${root}")" || return 2
+        found=0
+        while IFS=$'\t' read -r kind name; do
+            [[ "${kind}" == d && "${name}" == "${component}" ]] && found=1
+        done <<< "${entries}"
+        [[ "${found}" == 1 ]] || return 1
+        root="${root}/${component}"
+        if [[ "${relative}" == */* ]]; then relative="${relative#*/}"; else relative=''; fi
+    done
+    return 0
+}
+
 rtos_remove() {
-    local path="$1"
+    local path="$1" entries kind name
     rtos_assert_safe_path "${path}"
-    if [[ "${RTOS_MODE}" == "scp" ]]; then
+    case "${path}" in
+    gphoto2://* | mtp://*)
+        local uri_path="${path#*://}"
+        uri_path="${uri_path#*/}"
+        [[ "${uri_path}" == store_*/* && "${uri_path}" != */ ]] || die "拒绝删除 MTP 分区根：${path}"
+        ;;
+    esac
+    if [[ "${RTOS_MODE}" == scp ]]; then
         rtos_ssh "rm -rf -- '${path}'"
+    elif [[ "${RTOS_MODE}" == mtp ]]; then
+        kind="$(LC_ALL=C gio info -n -a standard::type "${path}")" || return 1
+        if [[ "${kind}" == *'standard::type: 2'* ]]; then
+            entries="$(rtos_list_entries "${path}")" || return 1
+            while IFS=$'\t' read -r kind name; do
+                [[ -z "${name}" ]] || rtos_remove "${path}/${name}" || return 1
+            done <<< "${entries}"
+        fi
+        gio remove "${path}"
     else
         rm -rf -- "${path}"
     fi
 }
 
-# 列出目录下的条目名。板端 msh 的 ls 可能是多列输出，这里统一拆成一行一个；
-# 目录不存在时返回空而不是报错。
 rtos_list_children() {
-    local dir="$1" out=''
-    rtos_assert_safe_path "${dir}"
-    if [[ "${RTOS_MODE}" == "scp" ]]; then
-        out="$(rtos_ssh "ls -a '${dir}'" 2>/dev/null || true)"
-    else
-        [[ -d "${dir}" ]] || return 0
-        out="$(ls -A "${dir}" 2>/dev/null || true)"
+    local entries kind name
+    entries="$(rtos_list_entries "$1")" || return 1
+    while IFS=$'\t' read -r kind name; do
+        [[ -z "${name}" ]] || printf '%s\n' "${name}"
+    done <<< "${entries}"
+}
+
+# 本地/SSH 可用 /proc 时补查写句柄，包括暂时没有追加数据的写入者。
+# MTP 不暴露打开句柄，由后续元数据观察检测变化。
+rtos_open_write_paths() {
+    local script
+    [[ "${RTOS_MODE}" != mtp ]] || return 0
+    script="$(cat <<'EOF'
+command -v readlink >/dev/null 2>&1 || exit 0
+[ -d /proc ] || exit 0
+for fd in /proc/[0-9]*/fd/[0-9]*; do
+    target=$(readlink "$fd" 2>/dev/null) || continue
+    case "$target" in "$1"/* | "$2"/*) ;; *) continue ;; esac
+    flags=''
+    fdinfo="${fd%/fd/*}/fdinfo/${fd##*/}"
+    if [ -r "$fdinfo" ]; then
+        while read -r key value rest; do
+            if [ "$key" = flags: ]; then flags=$value; break; fi
+        done < "$fdinfo"
     fi
-    printf '%s\n' "${out}" \
-        | tr -s ' \t' '\n' \
-        | grep -vE '^(\.|\.\.)?$' || true
+    # 能看到目标句柄但读不到访问模式时也保留。
+    case "$flags" in
+    '' | *[!0-7]*) printf '%s\n' "$target" ;;
+    *) [ "$((flags & 3))" -eq 0 ] || printf '%s\n' "$target" ;;
+    esac
+done
+exit 0
+EOF
+)"
+    if [[ "${RTOS_MODE}" == scp ]]; then
+        rtos_ssh "set -- '$1' '$2'"$'\n'"${script}"
+    else
+        sh -c "${script}" -- "$1" "$2"
+    fi
+}
+
+# 清理专用：记录整个目标的元数据；目录必须包括所有后代，不能只看目录 mtime。
+# 不读取日志/录像内容，不跟随符号链接。读取失败由调用方保留目标。
+rtos_data_snapshot() {
+    local path="$1" state
+    rtos_assert_safe_path "${path}"
+    if [[ "${RTOS_MODE}" == mtp ]]; then
+        state="$(rtos_mtp_tree_state "${path}")" || return 1
+    else
+        local script
+        script="$(cat <<'EOF'
+_rtos_tree_state() (
+    stat -c '%F|%d:%i|%s|%y|%z|%n' -- "$1" || exit 1
+    if [ -d "$1" ] && [ ! -L "$1" ]; then
+        [ -r "$1" ] && [ -x "$1" ] || exit 1
+        for child in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+            [ -e "$child" ] || [ -L "$child" ] || continue
+            _rtos_tree_state "$child" || exit 1
+        done
+    fi
+)
+_rtos_tree_state "$1"
+EOF
+)"
+        if [[ "${RTOS_MODE}" == scp ]]; then
+            state="$(rtos_ssh "set -- '${path}'"$'\n'"${script}")" || return 1
+        else
+            state="$(sh -c "${script}" -- "${path}")" || return 1
+        fi
+    fi
+    printf '%s\n' "${state}" | LC_ALL=C sort | sha256sum | cut -d' ' -f1
+}
+
+rtos_mtp_tree_state() {
+    local path="$1" metadata listing name size kind rest
+    metadata="$(LC_ALL=C gio info -n -a 'standard::type,standard::size,time::modified,time::modified-usec,etag::value' "${path}")" || return 1
+    printf '%s\n' "${path}" "${metadata}"
+    if [[ "${metadata}" == *'standard::type: 2'* ]]; then
+        listing="$(LC_ALL=C gio list -h -n -a 'standard::type,standard::size,time::modified,time::modified-usec,etag::value' "${path}")" || return 1
+        printf '%s\n' "${listing}"
+        while IFS=$'\t' read -r name size kind rest; do
+            [[ -n "${name}" ]] || continue
+            rtos_assert_safe_path "${path}/${name}"
+            case "${kind}" in
+            '(directory)') rtos_mtp_tree_state "${path}/${name}" || return 1 ;;
+            '(regular)')
+                [[ "${size}" =~ ^[0-9]+$ && "${rest}" == *time::modified=* ]] || return 1
+                ;;
+            '(symlink)' | '(symbolic link)') ;;
+            *) return 1 ;;
+            esac
+        done <<< "${listing}"
+    elif [[ "${metadata}" == *'standard::type: 1'* ]]; then
+        [[ "${metadata}" == *'standard::size: '* && "${metadata}" == *'time::modified: '* ]] || return 1
+    fi
 }
 
 # 构建与各部署方式使用相同的产物目录；BUILD_DIR 兼容旧部署配置。

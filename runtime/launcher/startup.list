@@ -64,8 +64,8 @@
 #                              录像落没落盘 / 收尾干不干净。
 /sdcard/app/dart_app --exp 900 --vision on --record on --rec-fps 60 --rec-keep 0 --rec-format png --raw-layout packed10-lsb --rec-dir /data/app/records --det-csv /data/app/records/detection.csv --log /data/app/logs/dart_app.log --imu on --imu-bus 1 --imu-cs 14 --imu-log /data/app/logs/imu.log &
 
-# 新板 IIM-42622：SPI1，CS IO14。相机失败只停用图像链路，IMU 持续至时限/停止信号。
-# 日志: /data/app/logs/imu.log（原始样本与积分状态）；不依赖 UART 文件传输。
+# 新板 IIM-42652：SPI1，CS IO14。相机失败只停用图像链路，IMU 持续至时限/停止信号。
+# 日志: /data/app/logs/imu_NNNNNN.log（每次启动新文件，原始样本与积分状态）。
 
 # ---- 先手动验证，再交给 launcher（强建议）----
 # 上电前先在 msh 里手跑一条，确认曝光/路径都对，再把它放进自启清单：

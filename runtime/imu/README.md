@@ -9,6 +9,7 @@
 dart::imu::Session session{device};
 if (!session.start("/data/app/logs/imu.log"))
     return 1;
+// session.log_path() 为本轮实际路径，例如 /data/app/logs/imu_000001.log。
 const auto seeded = session.seed(sensor_to_reference); // 取当前样本，要求静止。
 if (seeded.accepted) {
     const auto estimate = session.current();          // 与日志中的数据一致。
@@ -30,17 +31,25 @@ session.stop();                                       // 停采样、排空队�
 显式 seed/reset 都取消这个启动请求，reset 后不会自行重新积分。
 start/stop 由应用生命周期线程串行调用；stop 后应停止消费者发出命令。
 
-日志默认以 CSV 列写入 `.log` 文件，追加模式保留每轮内容。每次启动追加
-`# imu_log` 元数据行和列名，每次正常结束追加 `# session_end` 汇总行。
+每次启动都创建新文件，参数 `path` 是日志基名。例如 `/data/app/logs/imu.log`
+依次生成 `imu_000001.log`、`imu_000002.log`；启动时扫描同目录同基名文件，
+使用现有最大编号加一，不依赖日期或上电计时。创建使用 `O_CREAT | O_EXCL`，
+并发创建发生重名时继续尝试后续编号，不追加或覆盖旧文件；旧的 `imu.log` 也保留。
+自定义扩展名会保留，没有扩展名时补 `.log`。编号用尽（999999）或创建失败时
+`start()` 返回 false。`log_path()` 返回本轮实际文件名，应用的 IMU start/stop 状态行
+也记录该路径。文件创建成功后路径保持不变，可在 stop 后读取。
+
+日志以 CSV 列写入。每个新文件以 `# imu_log` 元数据行和列名开头，
+正常结束时追加 `# session_end` 汇总行。
 元数据包含估计器门限、采样周期和固定队列内存大小。解析时跳过 `#` 注释并识别
 每轮列名；generation 和 sequence 在新进程/新 Session 中重新计数。
 
-原始日志默认限制为 **32 MiB**，包含已存在的内容，重启不会重置额度。
+每轮新文件默认限制为 **32 MiB**，上一轮文件不占用本轮额度。
 达到上限后停止向该文件追加，保留已有内容；采样、估计和上层快照继续更新。
 不会自动删除或覆盖日志。此时 `stats().log_limit_reached=true`，未写入事件计入
 `dropped`，不计为 I/O 错误；文件可能以最后一条完整事件结束，没有结束汇总行。
 应用的独立状态日志仍报告采样计数、文件字节数和限额标志。第四参数可指定其他
-正数字节上限；记录新一轮完整原始数据前，应先归档并清理旧文件。
+正数字节上限。旧文件持续保留，需要按可用空间定期归档清理。
 
 | 列 | 含义 |
 |---|---|
@@ -64,8 +73,11 @@ start/stop 由应用生命周期线程串行调用；stop 后应停止消费者�
 sequence 缺口、后续 dropped 列和结束汇总可定位缺失，命令也遵循此规则。
 `stats()` 提供 samples/read_errors/written/dropped/io_errors/log_bytes/log_limit_reached；written 指写入 stdio
 成功的事件数，是否全部落盘还须检查 io_errors。异常断电可能丢失未同步内容。
+当前文件在 Session 停止前保持打开（达到限额也不会关闭），板端 FatFS 共享锁可能
+阻止 USB/MTP 同时读取；复位后程序改写新文件，上一轮文件可读取。
 
 主机 `imu_session_test` 覆盖日志与上层快照逐字段一致、重复时间戳、饱和、NaN、
 gap、重积分成功/失败、参考系变换、reset、初始 seed、读错误、文件错误，以及
-达到文件限额后仍能采样和 seed、跨会话保留已有内容且不突破限额。
+达到文件限额后仍能采样和 seed、每轮新建文件与独立额度、旧文件保留、编号缺口、
+并发创建、扩展名和路径错误，以及磁盘写入错误。
 真实 SPI 采样率、调度抖动、SD 卡吞吐和长时间记录仍待板端验证。
