@@ -47,6 +47,10 @@
 后续控制任务也由应用统一组装，按各自频率运行。`launcher` 负责进程启动与监督。应用说明见
 [`src/startup/README.md`](src/startup/README.md)。
 
+当前启动清单临时启用四路舵机 PWM 测试，每次开机运行约 43 秒后关闭输出，
+视觉/录像/IMU 应用行保留为注释。需显式构建并部署 `pwm_swing` 后再部署清单，
+接线、命令与恢复业务步骤见 [`PWM 测试说明`](tools/pwm_swing/README.md)。
+
 硬件资源是独占的：**同一时刻只能有一个进程持有 VICAP/VB**，所以"识别"和"录像"
 合在 `dart_app` 一个 ELF 里，清单里也只能出现一条。详见
 [`docs/LAUNCHER_DESIGN.md`](docs/LAUNCHER_DESIGN.md) §5。

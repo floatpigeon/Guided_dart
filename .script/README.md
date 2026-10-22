@@ -4,8 +4,8 @@
 
 | 命令 | 作用 | 参数 |
 |---|---|---|
-| `build-rtos` | 交叉编译板端可执行文件 | `-r`（清 build-cross 重编）/ `--host`（host 编译检查）/ `launcher` / `dart_app` |
-| `deploy-rtos` | 把产物上板到 `/sdcard/app/` | `launcher` / `dart_app` / `list`（只推清单）；可加 `--keep-logs` |
+| `build-rtos` | 交叉编译板端可执行文件 | `-r`（清 build-cross 重编）/ `--host`（host 编译检查）/ `launcher` / `dart_app` / `pwm_swing` |
+| `deploy-rtos` | 把产物上板到 `/sdcard/app/` | `launcher` / `dart_app` / `pwm_swing` / `list`（只推清单）；可加 `--keep-logs` |
 | `clean-rtos-data` | 清除两个分区上的空闲日志与录像（含历史归档），跳过写入中的项 | `--dry-run` / `logs` / `records` |
 | `clean-rtos` | 清除板端内容（**保留目录本身**；固件自带的 `examples/` 默认不动） | `launcher` / `dart_app` / `list` / `logs` / `records` / `examples` |
 
@@ -22,6 +22,17 @@ bash .script/install-rtos --both     # 一次性；详见下面"怎么直接敲 
 deploy-rtos
 deploy-rtos dart_app   # 只部署 dart_app
 ```
+
+四路舵机测试通过显式目标构建和部署：
+
+```bash
+build-rtos pwm_swing
+deploy-rtos pwm_swing
+# 板端 msh 手动运行 /sdcard/app/pwm_swing，约 43 秒后关闭输出。
+```
+
+接线、333 Hz / 1420～1620 µs 参数和波形验收见
+[`pwm_swing` 说明](../tools/pwm_swing/README.md)。
 
 需要指定其它板子时，可通过环境变量或 `.script/board.env` 配置：
 

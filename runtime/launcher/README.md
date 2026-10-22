@@ -22,6 +22,10 @@
 构建目标与产物路径在 `runtime/CMakeLists.txt`（本仓库约定：模块目录只放源码，
 目标集中声明）：`build-cross/launcher/launcher`。
 
+当前启动清单启用一次四路舵机 PWM 测试，视觉/录像/IMU 应用行暂时保留为注释。
+测试约 43 秒后关闭输出，日志为 `/data/app/logs/pwm_swing.console.log`；
+接线、部署和恢复业务步骤见 [PWM 测试说明](../../tools/pwm_swing/README.md)。
+
 ## 清单语法（每行一条）
 
 ```

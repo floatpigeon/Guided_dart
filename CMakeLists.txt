@@ -128,6 +128,10 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/runtime")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+if(CMAKE_CROSSCOMPILING)
+  add_subdirectory(tools/pwm_swing EXCLUDE_FROM_ALL)
+endif()
+
 include(CTest)
 if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
   add_subdirectory(tests)

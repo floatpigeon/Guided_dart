@@ -8,6 +8,13 @@ bag 写入边界，无需创建 ROS package 或运行 colcon。
 包含 RAW 转换器和历史 ISP 对照资源。它不参与正式应用的构建或部署，
 手动运行时独占相机资源。
 
+[`pwm_swing/`](pwm_swing/README.md) 是独立的四路舵机诊断程序，按 333 Hz、
+1520 µs 中心、±100 µs 摆幅逐路和同时测试。显式运行
+`bash .script/build-rtos pwm_swing` / `bash .script/deploy-rtos pwm_swing` 构建与部署，
+板端手动启动后约 43 秒结束。
+当前 launcher 清单也启用了每次开机运行一轮的 PWM 测试，日志写到
+`/data/app/logs/pwm_swing.console.log`；开机部署与恢复业务步骤见该工具说明。
+
 ## 录像逐帧播放器
 
 [`video_player/`](video_player/README.md) 移植远程 `k230_v1` 的 Qt 播放器，

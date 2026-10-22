@@ -328,6 +328,24 @@ sys.exit(subprocess.call(['/usr/bin/gio', *args]))
         self.run_script('deploy-rtos', 'list')
         self.assert_present(self.logs + self.records)
 
+    def test_pwm_swing_deploy_is_explicit_and_preserves_existing_files(self):
+        for mode in ('card', 'mtp'):
+            with self.subTest(mode=mode):
+                if mode == 'mtp':
+                    self.mode(mode)
+                artifacts = self.repo / 'artifacts'
+                binary = artifacts / 'pwm_swing/pwm_swing'
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_text('pwm-swing-' + mode)
+                self.env.update(DART_BUILD_DIR=str(artifacts), DATA_SDCARD='')
+                result = self.run_script('deploy-rtos', 'pwm_swing')
+                deployed = self.sd / 'app/pwm_swing'
+                self.assertEqual(deployed.read_text(), binary.read_text())
+                if mode == 'card':
+                    self.assertTrue(os.access(deployed, os.X_OK))
+                self.assertIn('/sdcard/app/pwm_swing', result.stdout)
+                self.assert_present(self.keep + self.logs + self.records)
+
     def test_unsafe_root_rejected(self):
         self.env['SDCARD'] = '/'
         self.run_script('clean-rtos-data', ok=False)
