@@ -20,11 +20,13 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "image_reader.cpp"
 #include "image_view.cpp"
 #include "recording.cpp"
+#include "recording_paths.cpp"
 
 namespace dart::tools::video_player {
 
@@ -127,7 +129,8 @@ inline int run_application(int argc, char** argv) {
     // Parse/help/check need no window system. Construct QApplication only for the viewer.
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral(
-        "Host frame viewer for v2 rec_NNNN/{img,logs/frames.csv}.\n"
+        "Host frame viewer for grouped PNG/PGM/PBM recordings and recorder CSV.\n"
+        "Accepts a directory of rec_NNNN sessions, a single session, or an image directory.\n"
         "Port of k230_v1 tools/video_player; manual stepping, no timed playback."));
     parser.addHelpOption();
     parser.addOption(QCommandLineOption({"f", "pbm"}, "Show only frame_*.pbm."));
@@ -135,11 +138,16 @@ inline int run_application(int argc, char** argv) {
     parser.addOption(QCommandLineOption("png", "Show only independent PNG frames."));
     parser.addOption(
         QCommandLineOption("check", "Check metadata associations without opening GUI."));
-    parser.addPositionalArgument("session", "A rec_NNNN session or its img directory.");
     parser.addPositionalArgument(
-        "frames.csv", "Recorder CSV (default: session/logs/frames.csv).", "[frames.csv]");
+        "recording", "A directory of sessions, one session, or an image directory with frames.csv.");
     parser.addPositionalArgument(
-        "detection.csv", "Detection CSV (default: records/detection.csv).", "[detection.csv]");
+        "frames.csv",
+        "Recorder CSV (auto: local frames.csv or session/logs/frames.csv; empty skips).",
+        "[frames.csv]");
+    parser.addPositionalArgument(
+        "detection.csv",
+        "Detection CSV (auto: local detection.csv or session parent; empty skips).",
+        "[detection.csv]");
     QStringList args;
     for (int i = 0; i < argc; ++i)
         args.push_back(QString::fromLocal8Bit(argv[i]));
@@ -160,18 +168,12 @@ inline int run_application(int argc, char** argv) {
     std::unique_ptr<QCoreApplication> application;
     if (parser.isSet("check"))
         application = std::make_unique<QCoreApplication>(argc, argv);
-    const QDir input(QFileInfo(positional.at(0)).absoluteFilePath());
-    const QDir images(input.exists("img") ? input.filePath("img") : input.absolutePath());
-    QDir session(images);
-    session.cdUp();
-    QDir records(session);
-    records.cdUp();
-    const QString frames_csv =
-        positional.size() > 1 ? positional.at(1) : session.filePath("logs/frames.csv");
-    const QString detection_csv =
-        positional.size() > 2 ? positional.at(2) : records.filePath("detection.csv");
+    const std::optional<QString> frames_csv =
+        positional.size() > 1 ? std::optional<QString>{positional.at(1)} : std::nullopt;
+    const std::optional<QString> detection_csv =
+        positional.size() > 2 ? std::optional<QString>{positional.at(2)} : std::nullopt;
     for (int i = 1; i < positional.size(); ++i) {
-        if (!QFileInfo::exists(positional.at(i))) {
+        if (!positional.at(i).isEmpty() && !QFileInfo::exists(positional.at(i))) {
             QTextStream(stderr) << positional.at(i) << ": explicit CSV does not exist\n";
             return 2;
         }
@@ -182,7 +184,7 @@ inline int run_application(int argc, char** argv) {
                             : parser.isSet("r")   ? "pgm"
                             : parser.isSet("png") ? "png"
                                                   : "";
-    if (!recording.load(images.absolutePath(), frames_csv, detection_csv, extension, error)) {
+    if (!recording.load_directory(positional.at(0), frames_csv, detection_csv, extension, error)) {
         QTextStream(stderr) << error << '\n';
         return 1;
     }

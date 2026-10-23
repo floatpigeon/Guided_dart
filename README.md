@@ -12,6 +12,8 @@
 先读 [`docs/STRUCTURE_DESIGN.md`](docs/STRUCTURE_DESIGN.md)（分层与依赖方向），
 启动链路读 [`docs/LAUNCHER_DESIGN.md`](docs/LAUNCHER_DESIGN.md)，
 板端调试读 [`docs/DEBUG_GUIDE.md`](docs/DEBUG_GUIDE.md)。
+录像与日志可通过 `write-rtos off|on` 暂停、恢复；清理前自动设置暂停，
+不等待板端应答。runtime 接口与可选加速度触发见 [写入控制](runtime/WRITE_CONTROL.md)。
 
 工作流（官方文档同款流程，见
 [如何运行和新增 HelloWorld 应用](https://www.kendryte.com/k230_rtos/zh/v0.8/userguide/helloworld.html)）：
@@ -140,10 +142,10 @@ HAL 头文件和库只取 SDK `.config` 的 `CONFIG_BOARD_CONFIG_NAME` 对应输
 本机 MCM RAW10 的 DDR 排列已通过 640×480 渐变图逐像素验证：
 默认 `--raw-layout packed10-lsb`，每 4 个像素按低位连续打包为 5 字节，每行 800 字节。
 后端同时修正本机 SDK 把 DMA 字节跨度当成输入像素宽度的问题；更换固件时需重新验证。
-应用默认通过曝光接口设置 2560 行曝光（`--exp 2560`）；K230 后端同步设置
-帧长 VTS=2571，通过现有传感器寄存器接口完成，无需修改固件或标定像素时钟。
+应用默认通过曝光接口设置 400 行曝光（`--exp 400`）；K230 后端同步设置
+帧长 VTS=600，通过现有传感器寄存器接口完成，无需修改固件或标定像素时钟。
 `--exp 0` 保留传感器初始化曝光；RAW 路径不支持 `--ae`。
-开机清单使用 `--exp 900`，避免 2560 行曝光限制 60 FPS 录像。此前连续 PBM 版本实测录像
+开机清单使用 `--exp 300`，对应帧长 VTS=600。此前连续 PBM 版本实测录像
 55.881 FPS，在 499,995,987 字节正常停录；目标场景曝光/阈值尚未标定，详见 [实板记录](src/startup/README.md#验证状态)。
 适配细节及板端验证步骤见 [相机说明](include/firmware/src/camera/README.md#sc038hgs--dart-v1)。
 

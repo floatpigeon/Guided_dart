@@ -62,9 +62,9 @@ msh> /sdcard/app/pwm_swing
 
 ## launcher 开机测试
 
-当前 `runtime/launcher/startup.list` 只启用 `/sdcard/app/pwm_swing &`，
-原来的视觉/录像/IMU 应用行保留为注释。普通 `&` 只启动一次并监督退出，
-不会重复摆动；每次重新上电或复位会运行一轮。
+当前 `runtime/launcher/startup.list` 启用识别、录像和 IMU，PWM 测试行已注释。
+需要开机测试时，先注释 `dart_app` 行，再启用 `/sdcard/app/pwm_swing &`。
+普通 `&` 只启动一次并监督退出，不会重复摆动；每次重新上电或复位会运行一轮。
 
 ```bash
 bash .script/build-rtos pwm_swing

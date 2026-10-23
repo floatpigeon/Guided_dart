@@ -62,7 +62,8 @@ inline bool read_csv(
     while (!input.atEnd()) {
         const QString line = input.readLine();
         ++line_number;
-        if (line.trimmed().isEmpty() || line.startsWith('#'))
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || trimmed.startsWith('#'))
             continue;
         QStringList fields;
         if (!split_csv(line, fields)) {
@@ -118,8 +119,8 @@ inline bool read_csv(
             row.values.insert(headers.at(i), fields.at(i));
         rows.push_back(std::move(row));
     }
-    if (headers.isEmpty() || input.status() != QTextStream::Ok) {
-        error = path + QStringLiteral(": empty CSV or read error");
+    if (input.status() != QTextStream::Ok) {
+        error = path + QStringLiteral(": CSV read error");
         return false;
     }
     return true;

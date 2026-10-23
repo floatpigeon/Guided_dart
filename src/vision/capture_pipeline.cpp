@@ -62,7 +62,8 @@ private:
 public:
     static int execute(
         const Arguments& args, std::unique_ptr<camera::ICamera> cam, platform::RunControl& control,
-        logging::Logger& log, imu::Session* imu_session = nullptr) noexcept {
+        logging::Logger& log, imu::Session* imu_session = nullptr,
+        platform::WriteControl* writes = nullptr) noexcept {
         bool vision_on = args.vision_on;
         bool record_on = args.record_on;
         log.line(
@@ -96,7 +97,7 @@ public:
         recorder::Recorder rec{recorder_config};
 
         DetectionCsv csv;
-        if (args.det_csv[0] != '\0' && !csv.open(args.det_csv)) {
+        if (args.det_csv[0] != '\0' && !csv.open(args.det_csv, writes)) {
             log.line(
                 "level=WARN module=app op=csv_open result=failed path=%s "
                 "action=continue\n",
@@ -115,8 +116,10 @@ public:
             "level=INFO module=app op=camera_start result=ok state=%u\n",
             static_cast<unsigned>(cam->state()));
 
-        if (record_on)
-            record_on = start_recording(rec, recorder_config, log);
+        if (record_on) {
+            record_on = writes != nullptr ? rec.start_controlled(*writes)
+                                          : start_recording(rec, recorder_config, log);
+        }
 
         Counters counters{};
         const auto start_time = std::chrono::steady_clock::now();
@@ -137,6 +140,13 @@ public:
                                             .count();
                 const auto stats = rec.stats();
                 log.begin_batch();
+                if (writes != nullptr)
+                    log.line(
+                        "level=INFO module=app op=write_control recording=%d logging=%d "
+                        "record_active=%d rec_error=%s record_trigger_ns=%llu\n",
+                        writes->recording_enabled(), writes->logging_enabled(), rec.started(),
+                        recorder::Recorder::error_text(rec.last_error()).data(),
+                        static_cast<unsigned long long>(writes->recording_request_ns()));
                 log.line(
                     "level=INFO module=app op=status elapsed_s=%lld frames=%llu "
                     "fps=%.1f no_frame=%llu lease_exhausted=%llu target=%llu "
@@ -323,7 +333,7 @@ public:
 
             csv.row(view, result_ptr, admission);
             (void)rec.drain_releases();
-            if (record_on && stop_recording_if_finished(rec, recorder_config, log))
+            if (record_on && writes == nullptr && stop_recording_if_finished(rec, recorder_config, log))
                 record_on = false;
             pipeline_timing.observe(pipeline_begin);
         }

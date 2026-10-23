@@ -11,6 +11,11 @@
 本程序**平台无关**：纯 POSIX C11，不含任何 K230/MPP 头文件，因此 host 也能构建
 与运行，可以在电脑上用假清单先把解析、前后台、子日志、单实例锁验证一遍。
 
+launcher 自身日志和子进程 console 日志服从 `/sdcard/app/control/write.pause` 开关。
+子进程 stdout/stderr 通过管道交给 launcher，暂停时继续消费输出并丢弃，避免占住日志文件
+或阻塞应用；恢复后重新追加文件。`-n` 留下后台应用时由独立收集进程消费到 EOF。
+主机 `write-rtos off|on`、清理脚本和 runtime 控制说明见 [写入控制](../WRITE_CONTROL.md)。
+
 ## 本目录文件
 
 | 文件 | 说明 |
@@ -22,9 +27,9 @@
 构建目标与产物路径在 `runtime/CMakeLists.txt`（本仓库约定：模块目录只放源码，
 目标集中声明）：`build-cross/launcher/launcher`。
 
-当前启动清单启用一次四路舵机 PWM 测试，视觉/录像/IMU 应用行暂时保留为注释。
-测试约 43 秒后关闭输出，日志为 `/data/app/logs/pwm_swing.console.log`；
-接线、部署和恢复业务步骤见 [PWM 测试说明](../../tools/pwm_swing/README.md)。
+当前启动清单启用 `dart_app`，在同一进程内运行识别、录像和 IMU，固定曝光 300 行，
+录像目标 60 FPS。PWM 测试行已注释，测试程序仅按需单独部署和手动运行；
+接线与部署步骤见 [PWM 测试说明](../../tools/pwm_swing/README.md)。
 
 ## 清单语法（每行一条）
 

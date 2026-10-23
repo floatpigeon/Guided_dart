@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 清除 /data/app 与 /sdcard/app 中的新旧日志、录像，支持 SSH、读卡器和 GIO/MTP。
-# 用法：clean-rtos-data [--dry-run] [logs|records]
+# 用法：clean-rtos-data [--dry-run] [--keep-paused] [logs|records]
 # 无目标参数时清日志和录像；--dry-run 只列出待删除项。
 # 含历史归档内的 logs* / records* / rec_NNNN 目录及 *.log、检测 CSV、视频文件。
 # 保留程序、清单、目录本身及 *.pid / *.done；写入中或无法确认空闲的项跳过。
@@ -15,16 +15,18 @@ CHECK_SECONDS="${RTOS_IDLE_CHECK_SECONDS:-2}"
 [[ "${CHECK_SECONDS}" =~ ^([1-9]|[1-5][0-9]|60)$ ]] || die "RTOS_IDLE_CHECK_SECONDS 必须是 1 到 60 的整数秒"
 command -v sha256sum >/dev/null || die "找不到 sha256sum（用于检测写入变化）"
 DRY_RUN=0
+KEEP_PAUSED=0
 TARGET=''
 for arg in "$@"; do
     case "${arg}" in
     -h | --help) sed -n '2,7s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; exit 0 ;;
     --dry-run) DRY_RUN=1 ;;
+    --keep-paused) KEEP_PAUSED=1 ;;
     logs | records)
         [[ -z "${TARGET}" ]] || die "只能指定一个目标：logs 或 records"
         TARGET="${arg}"
         ;;
-    *) die "未知参数：${arg}（可选 --dry-run、logs、records）" ;;
+    *) die "未知参数：${arg}（可选 --dry-run、--keep-paused、logs、records）" ;;
     esac
 done
 
@@ -36,6 +38,11 @@ if [[ "${RTOS_MODE}" == scp ]]; then
 else
     APP_STORE="${RTOS_TARGET}"
     DATA_STORE="${RTOS_DATA_STORE}"
+fi
+
+if [[ "${DRY_RUN}" != 1 ]]; then
+    rtos_pause_writes || die "无法设置暂停写入开关"
+    info "已请求暂停写入；直接开始清理，不等待板端应答。"
 fi
 
 PATHS=()
@@ -170,4 +177,9 @@ if [[ "${DRY_RUN}" == 1 ]]; then
 else
     [[ "${RTOS_MODE}" != card ]] || sync
     info "清理完成，删除 ${DELETED} 项，跳过 ${SKIPPED} 项；程序、启动清单、PID 与完成标记已保留。"
+    if [[ "${KEEP_PAUSED}" == 0 && "${SKIPPED}" == 0 ]]; then
+        rtos_release_write_pause || die "清理完成，但释放暂停开关失败"
+    elif [[ -n "${RTOS_PAUSE_HOLD:-}" ]]; then
+        info "保持暂停：${RTOS_PAUSE_HOLD}；处理完成后运行 write-rtos on 恢复。"
+    fi
 fi

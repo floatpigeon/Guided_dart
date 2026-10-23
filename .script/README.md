@@ -1,13 +1,17 @@
 # .script/ —— 仓库短命令
 
-四个日常命令，在仓库里任何位置都能跑（脚本自己会定位仓库根）：
+日常命令在仓库里任何位置都能跑（脚本自己会定位仓库根）：
 
 | 命令 | 作用 | 参数 |
 |---|---|---|
 | `build-rtos` | 交叉编译板端可执行文件 | `-r`（清 build-cross 重编）/ `--host`（host 编译检查）/ `launcher` / `dart_app` / `pwm_swing` |
 | `deploy-rtos` | 把产物上板到 `/sdcard/app/` | `launcher` / `dart_app` / `pwm_swing` / `list`（只推清单）；可加 `--keep-logs` |
-| `clean-rtos-data` | 清除两个分区上的空闲日志与录像（含历史归档），跳过写入中的项 | `--dry-run` / `logs` / `records` |
+| `clean-rtos-data` | 设置暂停后清除两个分区上的空闲日志与录像，跳过写入中的项 | `--dry-run` / `--keep-paused` / `logs` / `records` |
+| `write-rtos` | 暂停或恢复录像与日志写入，不等待板端应答 | `off` 暂停 / `on` 解除暂停 |
 | `clean-rtos` | 清除板端内容（**保留目录本身**；固件自带的 `examples/` 默认不动） | `launcher` / `dart_app` / `list` / `logs` / `records` / `examples` |
+
+清理不等待板端停写应答；成功后释放本次暂停，有跳过项或失败时保持暂停。
+处理完成后可运行 `write-rtos on` 恢复。详见 [写入控制](../runtime/WRITE_CONTROL.md)。
 
 要让上面这些名字能**直接敲**（不带 `./`、不带路径），先跑一次 `install-rtos`：
 

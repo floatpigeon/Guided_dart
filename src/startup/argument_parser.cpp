@@ -18,9 +18,13 @@ namespace dart::app {
 class Arguments {
 public:
     std::uint32_t seconds = 0; /* 0 = 跑到信号 */
-    std::uint32_t exposure_lines = 2560;
+    std::uint32_t exposure_lines = 400;
     bool vision_on = true;
     bool record_on = true;
+    bool record_auto = false;
+    std::uint32_t record_trigger_accel = 0;
+    std::uint32_t record_trigger_ms = 0;
+    std::uint32_t record_duration_ms = 0;
     std::uint32_t record_fps = recorder::Config{}.fps;
     std::uint32_t record_keep = 0;
     recorder::ImageFormat record_format = recorder::ImageFormat::kPng;
@@ -81,10 +85,13 @@ inline bool copy_path(char* out, std::size_t cap, std::string_view text) noexcep
 inline void usage(const char* argv0) {
     std::printf("用法: %s [选项]\n\n", argv0);
     std::printf("  --seconds N      有界运行秒数，0 = 跑到 SIGINT/SIGTERM（默认 0）\n");
-    std::printf("  --exp LINES      固定曝光行数（默认 2560；0 保留传感器初始曝光）\n");
+    std::printf("  --exp LINES      固定曝光行数（默认 400；0 保留传感器初始曝光）\n");
     std::printf("  --raw-layout F   packed10-lsb（默认，K230 实板验证）\n");
     std::printf("  --vision on|off  识别开关（默认 on）\n");
-    std::printf("  --record on|off  录像开关（默认 on）\n");
+    std::printf("  --record on|off|auto  录像策略（默认 on；auto 需 IMU 与显式触发参数）\n");
+    std::printf("  --rec-trigger-accel N  加速度模长阈值，单位 m/s²（无默认标定值）\n");
+    std::printf("  --rec-trigger-ms N     连续超阈值毫秒数（auto 必填）\n");
+    std::printf("  --rec-duration-ms N    触发后录像时长，0 = 持续请求（默认 0）\n");
     std::printf(
         "  --rec-fps N      目标录像帧率，按时间采样（默认 %u FPS）\n", recorder::Config{}.fps);
     std::printf("  --rec-keep N     只保留最近 N 轮录像，0 = 不清理（默认 0）\n");
@@ -147,21 +154,28 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
         }
         if (a == "--seconds" || a == "--exp" || a == "--rec-fps" || a == "--rec-keep"
             || a == "--threshold" || a == "--status-ms" || a == "--acquire-ms"
-            || a == "--max-acquire-errors") {
+            || a == "--max-acquire-errors" || a == "--rec-trigger-accel"
+            || a == "--rec-trigger-ms" || a == "--rec-duration-ms") {
             if (!need_value(value)) {
                 std::fprintf(
                     stderr, "%s: %.*s 缺少参数\n", argv[0], static_cast<int>(a.size()), a.data());
                 return std::unexpected<int>(2);
             }
             const auto n = parse_int(value);
-            if (n < 0) {
+            if (n < 0 || n > UINT32_MAX) {
                 std::fprintf(
                     stderr, "%s: %.*s 需要非负整数，得到 %.*s\n", argv[0],
                     static_cast<int>(a.size()), a.data(), static_cast<int>(value.size()),
                     value.data());
                 return std::unexpected<int>(2);
             }
-            if (a == "--seconds")
+            if (a == "--rec-trigger-accel")
+                args.record_trigger_accel = static_cast<std::uint32_t>(n);
+            else if (a == "--rec-trigger-ms")
+                args.record_trigger_ms = static_cast<std::uint32_t>(n);
+            else if (a == "--rec-duration-ms")
+                args.record_duration_ms = static_cast<std::uint32_t>(n);
+            else if (a == "--seconds")
                 args.seconds = static_cast<std::uint32_t>(n);
             else if (a == "--exp") {
                 args.exposure_lines = static_cast<std::uint32_t>(n);
@@ -190,6 +204,10 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
                 return std::unexpected<int>(2);
             }
             bool flag = false;
+            if (a == "--record" && value == "auto") {
+                args.record_on = args.record_auto = true;
+                continue;
+            }
             if (!parse_on_off(value, flag)) {
                 std::fprintf(
                     stderr, "%s: %.*s 需要 on|off\n", argv[0], static_cast<int>(a.size()),
@@ -202,8 +220,10 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
                 args.imu_on = flag;
             else if (a == "--imu-ignore-id")
                 args.imu_ignore_id = flag;
-            else
+            else {
                 args.record_on = flag;
+                args.record_auto = false;
+            }
             continue;
         }
         if (a == "--ae") {
@@ -283,6 +303,11 @@ inline std::expected<Arguments, int> parse_args(int argc, char* argv[]) {
         return std::unexpected<int>(2);
     }
 
+    if (args.record_auto && (!args.imu_on || args.record_trigger_accel == 0
+                            || args.record_trigger_ms == 0)) {
+        std::fprintf(stderr, "%s: --record auto 需要 IMU、--rec-trigger-accel 和 --rec-trigger-ms\n", argv[0]);
+        return std::unexpected<int>(2);
+    }
     if (args.imu_on && (args.imu_bus < 0 || args.imu_cs < -1)) {
         std::fprintf(stderr, "%s: --imu on 需要显式指定 --imu-bus 和 --imu-cs\n", argv[0]);
         return std::unexpected<int>(2);

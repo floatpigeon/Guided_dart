@@ -21,6 +21,10 @@ public:
     ImageFiles(const Config& config, const Session& session) noexcept
         : config_(config)
         , session_(session) {}
+    void reset() noexcept {
+        image_group_ = space_budget_ = 0;
+        space_checks_remaining_ = 0;
+    }
     bool png_path(
         std::uint64_t index, char* path, std::size_t path_size, char* name,
         std::size_t name_size) noexcept;

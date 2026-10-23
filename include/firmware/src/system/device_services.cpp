@@ -5,6 +5,8 @@
 #include <memory>
 
 #include "camera/interface.cpp"
+#include "imu/sample.cpp"
+#include "system/write_control.cpp"
 
 namespace dart::platform {
 
@@ -19,6 +21,9 @@ struct ImuOptions {
     int chip_select = -2;
     const char* log_path = nullptr;
     bool ignore_device_id = false;
+    WriteControl* writes = nullptr;
+    void (*sample_observer)(const imu::Sample&, void*) noexcept = nullptr;
+    void* sample_observer_context = nullptr;
 };
 
 } // namespace dart::platform

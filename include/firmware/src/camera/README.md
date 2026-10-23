@@ -73,13 +73,13 @@ RAW dump 在转换完成后立即归还，录像持有二值缓冲不会占用 D
 识别器和录像使用同一帧；二者固定用 128 区分黑白。默认 PBM 按 1 bit/像素存储，
 PGM 选项也只写二值像素。软件镜像在二值化时完成。
 
-应用默认通过曝光接口设置 **2560 行**（`--exp 2560`），K230 后端使用现有
-`kd_mpi_sensor_reg_read/write`，将曝光编码 40960（`0x0a000`）和帧长 `VTS=2571`
+应用默认通过曝光接口设置 **400 行**（`--exp 400`），K230 后端使用现有
+`kd_mpi_sensor_reg_read/write`，将曝光编码 6400（`0x01900`）和帧长 `VTS=600`
 放在同一寄存器组中提交，并读回核对。`--exp 0` 明确保留固件初始化的曝光。
 无需修改 SDK 驱动默认值或重新烧录固件，也不依赖内部 Pixel CLK 的微秒换算。
-像素时钟和 HTS 不变时，2560 行曝光时间是原 128 行的 20 倍，帧率为原
-`VTS=600` 时的 `600/2571`（约 23.3%）。`--rec-fps` 仅控制录像按接收时间抽帧。
-开机清单使用 900 行曝光、VTS=911，为约 60 FPS 录像留出采集余量。
+像素时钟和 HTS 不变时，400 行曝光时间是原 128 行的 3.125 倍，帧长保持
+`VTS=600`。`--rec-fps` 仅控制录像按接收时间抽帧。
+开机清单使用 300 行曝光、VTS=600，为约 60 FPS 录像留出采集余量。
 
 板端先验证 RAW10 排列、首帧、二值图和稳定录像，再标定像素时钟、黑电平、
 亮度响应与缓存一致性；主机模拟和交叉编译不能验证这些硬件行为。
@@ -88,7 +88,7 @@ PGM 选项也只写二值像素。软件镜像在二值化时完成。
 
 The C++ and C exposure APIs use integer sensor lines; ABI version 5 rejects
 configurations with the old microsecond semantics. `Controls::initial_exposure_lines`
-defaults to zero (preserve initialization), while the application supplies 2560.
+defaults to zero (preserve initialization), while the application defaults to 400.
 Startup and later adjustments use the same setter and line range, 4..65509.
 The C++ adapter clamps requests; the C backend rejects values outside that range.
 

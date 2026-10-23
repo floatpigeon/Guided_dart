@@ -33,6 +33,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             head_ = tail_ = count_ = 0;
+            dropped_.store(0);
             running_ = true;
         }
         if (::pthread_create(&thread_, nullptr, &EventWorker::entry, this) != 0) {

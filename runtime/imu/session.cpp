@@ -20,6 +20,8 @@
 
 #include "imu/estimator.cpp"
 #include "imu/interface.cpp"
+#include "storage/directories.cpp"
+#include "system/write_control.cpp"
 
 namespace dart::imu {
 
@@ -38,6 +40,8 @@ public:
         bool log_limit_reached = false;
     };
 
+    using SampleObserver = void (*)(const Sample&, void*) noexcept;
+
     static constexpr std::uint64_t kDefaultLogLimitBytes = 32ULL * 1024 * 1024;
 
     explicit Session(IImu& source, const Estimator::Config& config = {}) noexcept
@@ -53,7 +57,9 @@ public:
      * reset() never silently seeds again. */
     bool start(
         const char* path, std::uint32_t period_us = 1000, bool initial_seed = false,
-        std::uint64_t log_limit_bytes = kDefaultLogLimitBytes) noexcept;
+        std::uint64_t log_limit_bytes = kDefaultLogLimitBytes,
+        platform::WriteControl* writes = nullptr, SampleObserver observer = nullptr,
+        void* observer_context = nullptr) noexcept;
     void stop() noexcept;
     Estimator::Estimate current() const noexcept;
     Estimator::SeedResult seed(const Quaternionf& sensor_to_reference) noexcept;
@@ -90,6 +96,11 @@ private:
     bool write_event(const Event& event) noexcept;
     bool write_log(const char* data, int length, std::size_t capacity) noexcept;
     bool open_log(const char* base_path) noexcept;
+    bool begin_log(bool initial_seed) noexcept;
+    void end_log() noexcept;
+    bool logging_enabled() const noexcept {
+        return writes_ == nullptr || writes_->logging_enabled();
+    }
     static void* sample_entry(void* context) noexcept {
         static_cast<Session*>(context)->sample_loop();
         return nullptr;
@@ -120,6 +131,11 @@ private:
     bool sample_started_ = false, writer_started_ = false, used_ = false;
     std::FILE* file_ = nullptr;
     char log_path_[512]{};
+    char base_path_[512]{};
+    platform::WriteControl* writes_ = nullptr;
+    SampleObserver observer_ = nullptr;
+    void* observer_context_ = nullptr;
+    std::atomic<bool> log_active_{false};
     std::atomic<std::uint64_t> samples_{0}, read_errors_{0}, written_{0}, dropped_{0},
         io_errors_{0};
     std::atomic<std::uint64_t> log_bytes_{0};
@@ -231,28 +247,15 @@ inline bool Session::open_log(const char* base_path) noexcept {
     return false;
 }
 
-inline bool Session::start(
-    const char* path, std::uint32_t period_us, bool initial_seed,
-    std::uint64_t log_limit_bytes) noexcept {
-    if (used_ || path == nullptr || path[0] == '\0' || period_us == 0 || log_limit_bytes == 0)
-        return false;
-    queue_.reset(new (std::nothrow) Event[kQueueCapacity]);
-    if (!queue_)
-        return false;
-    if (!open_log(path))
-        return false;
-    struct stat file_status{};
-    if (::fstat(::fileno(file_), &file_status) != 0 || file_status.st_size < 0) {
-        std::fclose(file_);
-        file_ = nullptr;
+inline bool Session::begin_log(bool initial_seed) noexcept {
+    if (writes_ != nullptr)
+        storage::ensure_parent(base_path_);
+    if (!open_log(base_path_)) {
+        ++io_errors_;
         return false;
     }
-    log_bytes_.store(static_cast<std::uint64_t>(file_status.st_size));
-    log_limit_bytes_ = log_limit_bytes;
-    used_ = true;
-    writer_stopping_ = false;
-    period_us_ = period_us;
-    initial_seed_pending_ = initial_seed;
+    log_bytes_.store(0);
+    log_limit_reached_.store(false);
     char header[2048];
     const int header_length = std::snprintf(
         header, sizeof(header),
@@ -268,7 +271,7 @@ inline bool Session::start(
         "qw,qx,qy,qz,roll_rad,pitch_rad,yaw_rad,wx_rad_s,wy_rad_s,wz_rad_s,"
         "linear_ax_m_s2,linear_ay_m_s2,linear_az_m_s2,vx_m_s,vy_m_s,vz_m_s,"
         "rotation_x_rad,rotation_y_rad,rotation_z_rad,seed_qw,seed_qx,seed_qy,seed_qz\n",
-        static_cast<unsigned long long>(now_ns()), period_us, initial_seed ? 1 : 0,
+        static_cast<unsigned long long>(now_ns()), period_us_, initial_seed ? 1 : 0,
         static_cast<unsigned long long>(log_limit_bytes_), kQueueCapacity,
         sizeof(Event) * kQueueCapacity,
         static_cast<unsigned long long>(config_.max_integration_interval_ns),
@@ -278,9 +281,38 @@ inline bool Session::start(
     const bool header_ok = write_log(header, header_length, sizeof(header));
     if ((!header_ok && !log_limit_reached_.load()) || std::fflush(file_) != 0) {
         ++io_errors_;
-        stop();
+        end_log();
         return false;
     }
+    log_active_.store(true);
+    return true;
+}
+
+inline bool Session::start(
+    const char* path, std::uint32_t period_us, bool initial_seed,
+    std::uint64_t log_limit_bytes, platform::WriteControl* writes,
+    SampleObserver observer, void* observer_context) noexcept {
+    if (used_ || path == nullptr || path[0] == '\0' || std::strlen(path) >= sizeof(base_path_)
+        || period_us == 0 || log_limit_bytes == 0)
+        return false;
+    queue_.reset(new (std::nothrow) Event[kQueueCapacity]);
+    if (!queue_)
+        return false;
+    std::strcpy(base_path_, path);
+    writes_ = writes;
+    observer_ = observer;
+    observer_context_ = observer_context;
+    // Rejected path probes before the first successful start do not belong to
+    // the subsequent sampling session's I/O counters.
+    io_errors_.store(0);
+    log_limit_bytes_ = log_limit_bytes;
+    period_us_ = period_us;
+    initial_seed_pending_ = initial_seed;
+    writer_stopping_ = false;
+    // Logging failures must not disable acquisition in the controlled service.
+    if (logging_enabled() && !begin_log(initial_seed) && writes_ == nullptr)
+        return false;
+    used_ = true;
     if (::pthread_create(&writer_thread_, nullptr, &Session::writer_entry, this) != 0) {
         stop();
         return false;
@@ -322,6 +354,11 @@ inline void Session::stop() noexcept {
         (void)::pthread_join(writer_thread_, nullptr);
         writer_started_ = false;
     }
+    end_log();
+}
+
+inline void Session::end_log() noexcept {
+    log_active_.store(false);
     if (file_ != nullptr) {
         char footer[256];
         const int footer_length = std::snprintf(
@@ -388,7 +425,7 @@ inline Session::Stats Session::stats() const noexcept {
 }
 
 inline void Session::enqueue(Event event) noexcept {
-    if (!accepting_)
+    if (!accepting_ || !logging_enabled() || !log_active_.load())
         return;
     event.sequence = ++sequence_;
     event.recorded_ns = now_ns();
@@ -415,6 +452,8 @@ inline void Session::sample_loop() noexcept {
     auto next = std::chrono::steady_clock::now();
     while (sampling_.load()) {
         const auto sample = source_.read_sample();
+        if (sample && observer_ != nullptr)
+            observer_(*sample, observer_context_);
         {
             std::lock_guard lock(state_mutex_);
             Event event{};
@@ -446,14 +485,16 @@ inline void Session::sample_loop() noexcept {
 
 inline void Session::writer_loop() noexcept {
     auto next_flush = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    bool attempted = file_ != nullptr || logging_enabled();
     for (;;) {
         Event event{};
+        bool stopping = false;
         {
             std::unique_lock lock(queue_mutex_);
-            queue_ready_.wait_until(
-                lock, next_flush, [this] { return count_ > 0 || writer_stopping_; });
-            if (count_ == 0 && writer_stopping_)
-                break;
+            queue_ready_.wait_for(lock, std::chrono::milliseconds{20}, [this] {
+                return count_ > 0 || writer_stopping_;
+            });
+            stopping = writer_stopping_;
             if (count_ > 0) {
                 event = queue_[head_];
                 head_ = (head_ + 1) % kQueueCapacity;
@@ -461,14 +502,33 @@ inline void Session::writer_loop() noexcept {
             }
         }
         if (event.sequence != 0) {
-            if (write_event(event))
+            if (file_ == nullptr)
+                ++dropped_;
+            else if (write_event(event))
                 ++written_;
             else if (log_limit_reached_.load())
                 ++dropped_;
-            else
+            else {
                 ++io_errors_;
+                end_log();
+            }
         }
-        if (std::chrono::steady_clock::now() >= next_flush) {
+        bool empty = false;
+        {
+            std::lock_guard lock(queue_mutex_);
+            empty = count_ == 0;
+        }
+        const bool wanted = logging_enabled();
+        if ((!wanted || stopping) && empty) {
+            end_log();
+            attempted = false;
+            if (stopping)
+                break;
+        } else if (wanted && !stopping && file_ == nullptr && !attempted) {
+            attempted = true;
+            (void)begin_log(false);
+        }
+        if (file_ != nullptr && std::chrono::steady_clock::now() >= next_flush) {
             if (std::fflush(file_) != 0)
                 ++io_errors_;
             if (::fsync(::fileno(file_)) != 0)

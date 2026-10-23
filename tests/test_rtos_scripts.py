@@ -147,6 +147,40 @@ sys.exit(subprocess.call(['/usr/bin/gio', *args]))
     def test_cleanup_ssh(self):
         self.check_cleanup('ssh')
 
+    def test_write_switch_and_cleanup_preserve_manual_pause(self):
+        for mode in ('card', 'mtp', 'ssh'):
+            with self.subTest(mode=mode):
+                self.env.update(BOARD_IP='', SDCARD=str(self.sd), DATA_SDCARD=str(self.data),
+                                BOARD_DIR='/sdcard/app', BOARD_DATA_DIR='/data/app')
+                self.mode(mode)
+                self.run_script('write-rtos', 'off')
+                self.run_script('write-rtos', 'off')
+                pause = self.sd / 'app/control/write.pause'
+                self.assertTrue((pause / 'manual').exists())
+                result = self.run_script('clean-rtos-data')
+                self.assertIn('不等待板端应答', result.stdout)
+                self.assertEqual([p.name for p in pause.iterdir()], ['manual'])
+                self.run_script('write-rtos', 'on')
+                self.assertFalse(pause.exists())
+
+    def test_cleanup_requests_pause_before_observation_and_keeps_failed_pause(self):
+        self.mode('mtp')
+        pause = self.sd / 'app/control/write.pause'
+        active = self.data / 'app/logs/imu_000001.log'
+        def writing():
+            self.assertTrue(pause.is_dir())
+            self.assertTrue(any(p.name.startswith('cleanup.') for p in pause.iterdir()))
+            active.write_text('still closing')
+        output = self.run_during_observation(writing)
+        self.assertIn('保持暂停', output)
+        self.assertTrue(pause.is_dir())
+
+    def test_successful_cleanup_can_keep_pause(self):
+        self.run_script('clean-rtos-data', '--keep-paused')
+        self.assertTrue((self.sd / 'app/control/write.pause').is_dir())
+        self.run_script('write-rtos', 'on')
+        self.assertFalse((self.sd / 'app/control/write.pause').exists())
+
     def test_dry_run(self):
         self.mode('mtp')
         result = self.run_script('clean-rtos-data', '--dry-run')

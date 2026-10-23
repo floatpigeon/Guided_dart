@@ -69,8 +69,10 @@ if (acquired && acquired->status == dart::camera::AcquireStatus::kFrame) {
 写线程只使用独立像素，不持有相机帧。应用使用固定 16 帧图像队列，640×480 Y8
 共 4,915,200 字节，约可缓冲 267 ms 的 60 FPS 输入，覆盖实测 134 ms 的写盘停顿。
 停止录像后也要先
-drain，随后才能停止/销毁相机。一个 Recorder 成功启动后不能再次 start；stop 可重复调用，不会
-通过再次 start 重置未释放的租约。
+drain，随后才能停止/销毁相机。同一个 Recorder 可以在 stop 并排空租约后再次 start，
+复用缓冲并新建录像轮次；仍有租约时拒绝重启，避免丢失归还责任。
+应用通过 `start_controlled(writes)` 在后台执行启停，暂停时采集与识别继续运行。
+外部开关、runtime 接口和清理行为见 [写入控制](../../../../runtime/WRITE_CONTROL.md)。
 
 ## 文件和对应记录
 

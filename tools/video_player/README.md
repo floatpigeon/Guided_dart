@@ -13,6 +13,10 @@
 
 ```bash
 # 自动增量构建并打开；也可从其他目录调用 .script/player 的绝对路径。
+bash .script/player records
+
+# records 下有多段 rec_NNNN 时，按编号顺序连续浏览所有段。
+# 也可只打开一段板端原始会话目录。
 bash .script/player records/rec_0001
 
 # 默认显示 PNG/PGM/PBM；--png 仅看 PNG，-r 仅看 PGM，-f 仅看 PBM。
@@ -21,6 +25,9 @@ bash .script/player -r records/rec_0001
 # 拷贝位置不同可显式指定两个 CSV；包含空格的路径加引号。
 bash .script/player records/rec_0001/img \
   records/rec_0001/logs/frames.csv records/detection.csv
+
+# 只浏览图片，跳过自动发现的录像和检测 CSV。
+bash .script/player records "" ""
 ```
 
 也可以独立构建，不使用任何交叉编译预设：
@@ -29,13 +36,33 @@ bash .script/player records/rec_0001/img \
 cmake -S tools/video_player -B build/video_player
 cmake --build build/video_player --parallel
 ./build/video_player/video_player --help
-./build/video_player/video_player records/rec_0001
+./build/video_player/video_player records
 ```
 
 `DART_PLAYER_BUILD_DIR` 可覆盖脚本的默认构建目录 `build/video_player`。
-脚本透传参数，数据相对路径以调用时工作目录为准。必须指定一轮 `rec_NNNN`
-或其 `img` 目录，避免在多轮录像间隐式挑选。CSV 默认取该轮的 `logs/frames.csv`
-及其上一级的 `detection.csv`。显式给出的 CSV 路径不存在时直接报错。
+脚本透传参数，数据相对路径以调用时工作目录为准。指定一轮录像的目录，支持
+原始 `rec_NNNN`、其 `img` 目录，以及当前仓库 `records` 这样的拷贝布局：
+
+```text
+records/
+  frames.csv
+  b0000001/p0000001/00000001.png
+  b0000001/p0000001/00000002.png
+  b0000001/p0000002/00000033.png
+  detection.csv                       # 可选
+```
+
+图片直接位于输入目录时，优先读取该目录的 `frames.csv`，其次是 `logs/frames.csv`；
+原始会话布局优先读取 `logs/frames.csv`，其次是会话根目录的 `frames.csv`。
+检测 CSV 优先取会话/拷贝目录内的 `detection.csv`；原始 `rec_NNNN/img` 布局
+还兼容会话上一级的 `detection.csv`。图片直接位于输入目录时不会查找父目录的检测日志。
+显式给出的 CSV 路径优先使用，不存在时直接报错。
+
+输入目录直接包含多个 `rec_NNNN` 子目录时，按数字编号依次载入全部录像段。
+每段使用自己的 `logs/frames.csv`，检测日志按上述优先级分别解析；各段相同的图片编号
+和文件名不会串联到别段的日志。滑块可跨段浏览，右侧文件路径显示所属段。
+`--check records` 检查全部段，并输出总计和各段的检查结果。目录自身含图片或帧索引时，
+优先按单段/拷贝布局读取。多段输入不接受指定一份 `frames.csv`；需要覆盖时指定单段目录。
 
 建议一并拷贝以下内容，保持相对目录：
 
@@ -60,6 +87,8 @@ records/
    只读取和解码当前选中帧，不把整个录像载入内存。
 2. 用 `frames.csv` 的 **`image_file + file_offset`** 精确匹配连续帧，校验 `file_bytes`、
    `decision=accepted` 和 `image_index`。独立图片用包含分组目录的完整 `image_file`；PNG 同时校验 `file_offset=0` 与 `file_bytes` 等于磁盘文件长度，冲突时停用该帧关联。
+   拷贝布局中 CSV 仍可保留板端的 `img/b.../p.../编号.png`，无需修改日志或移动图片；
+   注释里的板端 `session=/data/app/...` 不影响主机路径解析。
    `image_index` 是输出帧的编号，不是输入帧号或 CSV 行号。
 3. 用录像行的 **`source_sequence + received_us + source_pts`** 精确匹配检测行的
    **`sequence + received_us + source_pts`**，并核对检测的 `admission=accepted`。
@@ -70,7 +99,10 @@ records/
 重复匹配、放行冲突或没有对应文字时明确提示，停用该帧的检测关联；不按最近时间
 或相邻行补齐。metadata 队列本身也可能丢行，所以有图不等于一定有录像 CSV 行。
 
-缺少默认 CSV 时仍可查看图片；缺少检测结果时不画检测叠加。损坏的 CSV、错误的表头
+缺少默认 CSV，或 CSV 为空文件、仅含空白/注释、只有有效表头时，仍可查看图片。
+面板会提示没有数据行；没有录像行时不关联检测结果，空的检测 CSV 不画检测叠加。
+显式传入空字符串可跳过对应 CSV，例如 `bash .script/player records "" ""` 只看图片。
+损坏的 CSV、错误的表头
 或非法身份字段会报告文件和行号。当前关闭识别/识别出错时写出的短空字段行会按
 `kind=none, valid=0` 的格式兼容，保留原文并正确识别最后的 `admission`。
 图片读取失败时清空图像区，并显示错误，防止旧图与新文字同屏。
@@ -87,6 +119,7 @@ records/
 
 ```bash
 ./build/video_player/video_player --check records/rec_0001
+./build/video_player/video_player --check records
 ctest --test-dir build/video_player --output-on-failure
 python3 tests/check_cpp_structure.py
 ```
@@ -94,15 +127,20 @@ python3 tests/check_cpp_structure.py
 `--check` 不要求桌面环境，只检查文件列表和文字关联，不解码全部图片。
 输出图片数、录像匹配数、检测匹配数和 CSV 有记录但磁盘缺图的数量；还会列出
 未匹配/冲突的图片。成功返回 0，关联不完整或解析失败返回 1，命令参数错误返回 2。
-若没有检测 CSV，仅以录像关联判断完整性；不代表已经验证了检测结果。
+若没有检测 CSV 或其中没有数据行，仅以录像关联判断完整性；不代表已经验证了检测结果。
+录像 CSV 为空或被跳过时，图片可以正常浏览，但 `--check` 仍因缺少录像关联返回 1。
+图片数量可能多于录像 CSV 的记录数，播放器会逐张提示缺少录像行；若末尾 PNG 为
+0 字节，选中时清空图像区并提示读取失败，不会为这些图片补配日志。
 
 `recording_types.cpp` 定义帧和 CSV 行数据，`csv.cpp` 负责 CSV 解析，
-`image_reader.cpp` 负责逐帧解码，`recording.cpp` 扫描文件并关联录像/检测记录；
+`recording_paths.cpp` 解析原始会话和拷贝布局的默认路径，`image_reader.cpp` 负责逐帧解码，
+`recording.cpp` 扫描文件并关联录像/检测记录；
 `image_view.cpp` 管理显示和原图坐标映射，`player.cpp` 组合窗口与命令入口，
 `main.cpp` 仅转交入口。可包含 `.cpp` 使用包含保护、
 单个具名命名空间及 inline 定义；CMake 分别编译每个组件以验证独立包含。
-测试使用 Qt offscreen 平台，不需要实际显示器，覆盖真实 PNG/PGM/PBM 解码、PNG 跨分组目录关联及偏移/长度冲突、非整字节 PBM
-行宽、序号/时间身份、缺图与重复记录、关闭识别、叠加边界、切帧和像素点击。
+测试使用 Qt offscreen 平台，不需要实际显示器，覆盖真实 PNG/PGM/PBM 解码、单色 1-bit PNG、
+当前拷贝布局、缺少日志的尾部图片与空 PNG、默认 CSV 路径、PNG 跨分组目录关联及偏移/长度冲突、非整字节 PBM
+行宽、序号/时间身份、空 CSV 与空路径参数、缺图与重复记录、关闭识别、叠加边界、切帧和像素点击。
 
 2026-10-16 在本机 Qt 5.15.13 / GCC 13.3 上独立构建和 CTest 通过，
 `check_cpp_structure.py` 检查通过；使用既有主机录像样本验证了 `--check`，

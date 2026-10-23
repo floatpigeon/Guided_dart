@@ -10,6 +10,7 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <set>
@@ -17,12 +18,16 @@
 #include <vector>
 
 #include "csv.cpp"
+#include "recording_paths.cpp"
 #include "recording_types.cpp"
 
 namespace dart::tools::video_player {
 
 class Recording final {
 public:
+    bool load_directory(
+        const QString& directory, const std::optional<QString>& frames_csv,
+        const std::optional<QString>& detection_csv, const QString& extension, QString& error);
     bool load(
         const QString& image_directory, const QString& frames_csv, const QString& detection_csv,
         const QString& extension, QString& error);
@@ -39,7 +44,7 @@ public:
     }
     bool complete() const {
         return event_matches_ == frames_.size() && missing_images_ == 0
-            && (!has_detection_ || detection_matches_ == event_matches_);
+            && detection_matches_ == required_detection_matches_;
     }
 
 private:
@@ -49,8 +54,40 @@ private:
     std::size_t event_matches_ = 0;
     std::size_t detection_matches_ = 0;
     std::size_t missing_images_ = 0;
-    bool has_detection_ = false;
+    std::size_t required_detection_matches_ = 0;
 };
+
+inline bool Recording::load_directory(
+    const QString& directory, const std::optional<QString>& frames_csv,
+    const std::optional<QString>& detection_csv, const QString& extension, QString& error) {
+    *this = Recording{};
+    error.clear();
+    const auto directories = RecordingPaths::directories(directory);
+    if (directories.size() > 1 && frames_csv && !frames_csv->isEmpty()) {
+        error = QStringLiteral("Multiple sessions use separate frames.csv files; "
+                               "select one rec_NNNN directory to override its recorder CSV.");
+        return false;
+    }
+    for (const auto& session : directories) {
+        const auto paths = RecordingPaths::resolve(session);
+        Recording recording;
+        if (!recording.load(
+                paths.images, frames_csv.value_or(paths.frames_csv),
+                detection_csv.value_or(paths.detection_csv), extension, error))
+            return false;
+        if (directories.size() > 1)
+            notes_ << session + ": " + recording.summary();
+        notes_ << recording.notes_;
+        event_matches_ += recording.event_matches_;
+        detection_matches_ += recording.detection_matches_;
+        missing_images_ += recording.missing_images_;
+        required_detection_matches_ += recording.required_detection_matches_;
+        frames_.insert(
+            frames_.end(), std::make_move_iterator(recording.frames_.begin()),
+            std::make_move_iterator(recording.frames_.end()));
+    }
+    return true;
+}
 
 inline bool Recording::append_stream(const QFileInfo& file_info, QString& error) {
     QFile file(file_info.absoluteFilePath());
@@ -144,7 +181,9 @@ inline bool Recording::load(
     }
 
     std::vector<CsvRow> events;
-    if (!QFileInfo::exists(frames_csv)) {
+    if (frames_csv.isEmpty()) {
+        notes_ << QStringLiteral("No recorder CSV; images have no recorder metadata.");
+    } else if (!QFileInfo::exists(frames_csv)) {
         notes_ << frames_csv + QStringLiteral(": missing; images have no recorder metadata");
     } else if (!read_csv(
                    frames_csv,
@@ -152,6 +191,9 @@ inline bool Recording::load(
                     "image_index", "image_file"},
                    events, error)) {
         return false;
+    } else if (events.empty()) {
+        notes_ << frames_csv
+                      + QStringLiteral(": no data rows; images have no recorder metadata");
     }
     std::map<QString, std::vector<const CsvRow*>> by_image;
     const QRegularExpression image_name(QStringLiteral(
@@ -191,8 +233,8 @@ inline bool Recording::load(
     }
 
     std::vector<CsvRow> detections;
-    has_detection_ = !detection_csv.isEmpty() && QFileInfo::exists(detection_csv);
-    if (!has_detection_) {
+    bool has_detection = !detection_csv.isEmpty() && QFileInfo::exists(detection_csv);
+    if (!has_detection) {
         notes_ << QStringLiteral("No detection CSV; target/scan overlays unavailable.");
     } else if (!read_csv(
                    detection_csv,
@@ -200,6 +242,10 @@ inline bool Recording::load(
                     "win_y0", "win_x1", "win_y1", "admission"},
                    detections, error)) {
         return false;
+    } else if (detections.empty()) {
+        has_detection = false;
+        notes_ << detection_csv
+                      + QStringLiteral(": no data rows; target/scan overlays unavailable.");
     }
     std::map<QString, std::vector<const CsvRow*>> by_identity;
     for (const CsvRow& row : detections) {
@@ -239,8 +285,9 @@ inline bool Recording::load(
         }
         frame.event = event;
         ++event_matches_;
-        if (!has_detection_)
+        if (!has_detection)
             continue;
+        ++required_detection_matches_;
         const auto it = by_identity.find(*frame_identity(event, "source_sequence"));
         if (it == by_identity.end() || it->second.size() != 1) {
             frame.notes << QStringLiteral("Detection: %1 for sequence + received_us + source_pts.")

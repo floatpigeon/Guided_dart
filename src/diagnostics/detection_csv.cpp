@@ -10,11 +10,11 @@ namespace dart::app {
 // Detection schema and business values; buffering and file I/O live below L4.
 class DetectionCsv final {
 public:
-    bool open(const char* path) noexcept {
+    bool open(const char* path, platform::WriteControl* writes = nullptr) noexcept {
         return writer_.open(
             path, "sequence,received_us,source_pts,kind,valid,cx,cy,area,radius,"
                   "quality,clipped,missed_frames,candidates,full_frame,rescanned,"
-                  "win_x0,win_y0,win_x1,win_y1,admission\n");
+                  "win_x0,win_y0,win_x1,win_y1,admission\n", writes);
     }
 
     void

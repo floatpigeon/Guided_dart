@@ -57,6 +57,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "system/write_pause.h"
+
 #define DEFAULT_LIST    "/sdcard/app/startup_final.list"
 #define DEFAULT_LOG_DIR "/data/app/logs"
 
@@ -90,6 +92,60 @@ static char g_pid_path[MAX_PATH] = DEFAULT_LOG_DIR "/launcher.pid";
 static struct bg_item g_bg[MAX_BG];
 static int g_bg_count = 0;
 
+struct console_item {
+    int used;
+    int fd;
+    char path[MAX_PATH];
+};
+static struct console_item g_console[MAX_BG * 2];
+static void ensure_dir(const char* dir);
+
+/* Children retain a pipe, never a log file. Keep consuming while paused so
+ * console traffic cannot fill a pipe and stall application work. */
+static int pump_consoles(void) {
+    int active = 0;
+    int paused = dart_writes_paused(dart_write_pause_path());
+    for (unsigned i = 0; i < sizeof(g_console) / sizeof(g_console[0]); ++i) {
+        struct console_item* item = &g_console[i];
+        if (!item->used)
+            continue;
+        for (int budget = 0; budget < 64; ++budget) {
+            char data[4096];
+            ssize_t count = read(item->fd, data, sizeof(data));
+            if (count > 0) {
+                if (!paused) {
+                    int fd = open(item->path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+                    if (fd < 0 && errno == ENOENT) {
+                        ensure_dir(g_opt.log_dir);
+                        fd = open(item->path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+                    }
+                    if (fd >= 0) {
+                        ssize_t offset = 0;
+                        while (offset < count) {
+                            ssize_t written = write(fd, data + offset, (size_t)(count - offset));
+                            if (written < 0 && errno == EINTR)
+                                continue;
+                            if (written <= 0)
+                                break;
+                            offset += written;
+                        }
+                        (void)fsync(fd);
+                        close(fd);
+                    }
+                }
+                continue;
+            }
+            if (count == 0 || (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                close(item->fd);
+                item->used = 0;
+            }
+            break;
+        }
+        active += item->used;
+    }
+    return active;
+}
+
 /* ------------------------------------------------------------------------- */
 /* 日志：每行 打开->写->fsync->关闭。进程不长期持有日志 fd，板端 MTP/文件管理器
  * 才能随时读到；RT-Smart 上 printf 走控制台而不是文件。 */
@@ -103,14 +159,19 @@ static unsigned long long mono_ms(void) {
 
 static void sleep_ms(int ms) {
     struct timespec ts;
-    if (ms <= 0)
-        return;
-    ts.tv_sec = ms / 1000;
-    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
-    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+    while (ms > 0) {
+        int step = ms > 20 ? 20 : ms;
+        (void)pump_consoles();
+        ts.tv_sec = 0;
+        ts.tv_nsec = (long)step * 1000000L;
+        while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+        ms -= step;
+    }
 }
 
 static void llog(const char* fmt, ...) {
+    if (dart_writes_paused(dart_write_pause_path()))
+        return;
     char body[MAX_LINE];
     char line[MAX_LINE + 64];
     va_list ap;
@@ -131,6 +192,10 @@ static void llog(const char* fmt, ...) {
         total = (int)sizeof(line) - 1;
 
     fd = open(g_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0 && errno == ENOENT) {
+        ensure_dir(g_opt.log_dir);
+        fd = open(g_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    }
     if (fd < 0) {
         /* 日志目录不可用（例如 /sdcard 未挂载）时退到 stderr，不影响启动流程。 */
         (void)!write(STDERR_FILENO, line, (size_t)total);
@@ -304,6 +369,8 @@ static int launch_one(char* line, int lineno) {
     char exit_marker[MAX_PATH] = "";
     struct stat st;
     pid_t pid;
+    int console_pipe[2] = {-1, -1};
+    int console_index = -1;
 
     snprintf(command, sizeof(command), "%s", line);
     /* 1) 按空白切 token */
@@ -384,9 +451,29 @@ static int launch_one(char* line, int lineno) {
         }
     }
 
+    (void)pump_consoles();
+    for (unsigned i = 0; i < sizeof(g_console) / sizeof(g_console[0]); ++i) {
+        if (!g_console[i].used) {
+            console_index = (int)i;
+            break;
+        }
+    }
+    if (console_index >= 0 && pipe(console_pipe) == 0) {
+        if (fcntl(console_pipe[0], F_SETFL, O_NONBLOCK) != 0
+            || fcntl(console_pipe[0], F_SETFD, FD_CLOEXEC) != 0) {
+            close(console_pipe[0]);
+            close(console_pipe[1]);
+            console_pipe[0] = console_pipe[1] = -1;
+        }
+    }
+
     /* 4) fork + execv：RT-Smart 中每个 ELF 就是独立进程（lwp） */
     pid = fork();
     if (pid < 0) {
+        if (console_pipe[0] >= 0) {
+            close(console_pipe[0]);
+            close(console_pipe[1]);
+        }
         llog(
             "level=ERROR module=launcher op=fork line=%d code=fork_failed err=%s "
             "path=%s\n",
@@ -396,15 +483,18 @@ static int launch_one(char* line, int lineno) {
     if (pid == 0) {
         if ((restart || !background) && setenv("DART_EXIT_MARKER", exit_marker, 1) != 0)
             _exit(127);
-        /* 子进程：stdout/stderr 落各自的 console 日志，业务自己的结构化日志另写。 */
-        if (item_path(pathbuf, sizeof(pathbuf), g_opt.log_dir, name, ".console.log") == 0) {
-            int fd = open(pathbuf, O_WRONLY | O_CREAT | O_APPEND, 0666);
-            if (fd >= 0) {
-                (void)dup2(fd, STDOUT_FILENO);
-                (void)dup2(fd, STDERR_FILENO);
-                if (fd > STDERR_FILENO)
-                    close(fd);
-            }
+        for (unsigned i = 0; i < sizeof(g_console) / sizeof(g_console[0]); ++i) {
+            if (g_console[i].used)
+                close(g_console[i].fd);
+        }
+        if (console_pipe[0] >= 0)
+            close(console_pipe[0]);
+        int output = console_pipe[1] >= 0 ? console_pipe[1] : open("/dev/null", O_WRONLY);
+        if (output >= 0) {
+            (void)dup2(output, STDOUT_FILENO);
+            (void)dup2(output, STDERR_FILENO);
+            if (output > STDERR_FILENO)
+                close(output);
         }
         execv(path, tok); /* 成功后不返回 */
         llog(
@@ -412,6 +502,17 @@ static int launch_one(char* line, int lineno) {
             "path=%s\n",
             lineno, strerror(errno), path);
         _exit(127);
+    }
+
+    if (console_pipe[1] >= 0) {
+        close(console_pipe[1]);
+        struct console_item* item = &g_console[console_index];
+        if (item_path(item->path, sizeof(item->path), g_opt.log_dir, name, ".console.log") == 0) {
+            item->fd = console_pipe[0];
+            item->used = 1;
+        } else {
+            close(console_pipe[0]);
+        }
     }
 
     /* 5) 父进程 */
@@ -793,5 +894,19 @@ int main(int argc, char* argv[]) {
 
     llog("level=INFO module=launcher op=exit result=done background=%d\n", g_bg_count);
     unlink(g_pid_path);
+    /* -n and foreground timeouts leave applications running. Hand remaining
+     * pipes to a detached collector so their consoles remain usable. */
+    if (pump_consoles() > 0) {
+        pid_t collector = fork();
+        if (collector == 0) {
+            while (pump_consoles() > 0)
+                sleep_ms(20);
+            _exit(0);
+        }
+        if (collector < 0) {
+            while (pump_consoles() > 0)
+                sleep_ms(20);
+        }
+    }
     return 0;
 }

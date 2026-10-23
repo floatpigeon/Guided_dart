@@ -50,6 +50,9 @@ public:
         return true;
     }
     bool open(RecorderError& error) noexcept {
+        files_.reset();
+        bytes_written_ = last_png_bytes_ = 0;
+        image_name_[0] = '\0';
         if (config_.image_format == ImageFormat::kPng) {
             last_flush_ = std::chrono::steady_clock::now();
             return true;

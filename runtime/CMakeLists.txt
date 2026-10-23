@@ -25,6 +25,7 @@ endif()
 # host 也能构建与运行，便于在电脑上用假清单验证解析、前后台与子日志行为。
 # ---------------------------------------------------------------------------
 add_executable(launcher launcher/main.c)
+target_include_directories(launcher PRIVATE "${PROJECT_SOURCE_DIR}/include/firmware/src")
 target_compile_features(launcher PRIVATE c_std_11)
 target_compile_options(launcher PRIVATE -Wall -Wextra -Wpedantic
     -ffunction-sections -fdata-sections)

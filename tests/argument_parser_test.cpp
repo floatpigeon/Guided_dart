@@ -13,7 +13,7 @@ public:
         char program[] = "dart_app";
         char* defaults[] = {program};
         auto parsed = app::parse_args(1, defaults);
-        assert(parsed && parsed->record_on && parsed->exposure_lines == 2560);
+        assert(parsed && parsed->record_on && parsed->exposure_lines == 400);
         assert(parsed->record_fps == 60 && parsed->record_keep == 0);
         assert(parsed->record_format == recorder::ImageFormat::kPng && parsed->threshold == 50);
         assert(app::recording_config(*parsed, 640, 480).max_storage_bytes == 2'000'000'000);
@@ -67,11 +67,11 @@ public:
         parsed = app::parse_args(2, automatic_exposure);
         assert(!parsed);
         char exp[] = "--exp";
-        char exposure[] = "2560";
+        char exposure[] = "300";
         char preserve[] = "0";
         char* fixed_exposure[] = {program, exp, exposure};
         parsed = app::parse_args(3, fixed_exposure);
-        assert(parsed && parsed->exposure_lines == 2560);
+        assert(parsed && parsed->exposure_lines == 300);
         fixed_exposure[2] = preserve;
         parsed = app::parse_args(3, fixed_exposure);
         assert(parsed && parsed->exposure_lines == 0);
@@ -122,6 +122,18 @@ public:
         bypass[8] = ten;
         assert(!app::parse_args(9, bypass));
         assert(!app::parse_args(8, bypass));
+        char automatic[] = "auto";
+        char trigger_accel[] = "--rec-trigger-accel";
+        char trigger_ms[] = "--rec-trigger-ms";
+        char* auto_missing[] = {program, record, automatic};
+        assert(!app::parse_args(3, auto_missing));
+        char* auto_valid[] = {program, record, automatic, imu, on, bus, zero, cs, hal_cs,
+                             trigger_accel, ten, trigger_ms, ten};
+        parsed = app::parse_args(13, auto_valid);
+        assert(parsed && parsed->record_on && parsed->record_auto);
+        assert(parsed->record_trigger_accel == 10 && parsed->record_trigger_ms == 10);
+        auto_valid[12] = zero;
+        assert(!app::parse_args(13, auto_valid));
     }
 };
 

@@ -142,11 +142,11 @@ private:
         metadata.resume();
         recorder.stop();
         assert(recorder.pending_releases() == 1);
+        assert(!recorder.start()); // Restart cannot discard an outstanding camera lease.
+        assert(recorder.last_error() == dart::recorder::Error::kAlreadyStarted);
         assert(recorder.drain_releases() == 1);
         assert(slot.state == dart::camera::FrameLeaseAccess::SlotState::kFree);
         assert(recorder.stats().written == 1);
-        assert(!recorder.start());
-        assert(recorder.last_error() == dart::recorder::Error::kAlreadyStarted);
         const bool pbm = format == dart::recorder::ImageFormat::kPbm;
         const auto root = std::filesystem::path{path} / "rec_0001";
         const auto image = root / (pbm ? "img/recording.pbm" : "img/recording.pgm");
@@ -164,6 +164,18 @@ private:
             == recorder.stats().input);
         assert(events.find(",17,") != std::string::npos);
         assert(events.find(",accepted,") != std::string::npos);
+        assert(recorder.start());
+        slot.state = dart::camera::FrameLeaseAccess::SlotState::kHeld;
+        slot.view.sequence = 18;
+        slot.view.received = std::chrono::microseconds{1};
+        submit(recorder, slot);
+        recorder.stop();
+        assert(recorder.drain_releases() == 1);
+        assert(recorder.stats().written == 1);
+        const auto second = std::filesystem::path{path} / "rec_0002"
+            / (pbm ? "img/recording.pbm" : "img/recording.pgm");
+        assert(std::filesystem::file_size(second) == actual.size());
+        assert(std::filesystem::file_size(image) == actual.size());
         std::filesystem::remove_all(path);
     }
 

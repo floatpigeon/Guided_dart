@@ -22,6 +22,7 @@
 #include "recorder/error.cpp"
 #include "recorder/storage/image_writer.cpp"
 #include "recorder/storage/session.cpp"
+#include "system/write_control.cpp"
 
 namespace dart::recorder {
 
@@ -65,6 +66,9 @@ public:
     Recorder& operator=(const Recorder&) = delete;
 
     bool start() noexcept;
+    // File sessions run on the supervisor; acquisition only tries admission.
+    // A false->true write request starts a fresh session after releases drain.
+    bool start_controlled(platform::WriteControl& writes) noexcept;
     void stop() noexcept;
 
     /* On kAccepted pixels are copied into a bounded slot and ownership moves
@@ -80,6 +84,8 @@ public:
 
     bool started() const noexcept;
     bool limit_reached() const noexcept { return limit_reached_.load(std::memory_order_acquire); }
+    // Paths and the session budget are stable after stop(), or with lifecycle
+    // calls serialized by the owner. Use stats()/started() during controlled runs.
     const char* directory() const noexcept { return session_.directory(); }
     const char* recording_path() const noexcept { return session_.image_path(); }
     std::uint64_t file_limit_bytes() const noexcept { return session_.file_limit_bytes(); }
@@ -125,6 +131,8 @@ private:
      * creation reports failure through pthread_create's return code instead. */
     static void* image_thread_entry(void* context) noexcept;
     void rollback_start() noexcept;
+    void stop_session() noexcept;
+    static void* control_entry(void* context) noexcept;
 
     void set_error(Error error) noexcept { error_.set_error(error); }
 
@@ -152,11 +160,17 @@ private:
     pthread_t image_thread_{};
     bool image_thread_started_ = false;
     bool accepting_ = false;
-    /* A Recorder owns camera leases across its worker and release queue.  A
-     * second start would otherwise reset those queues and lose unreleased
-     * leases, so a successfully started instance is single-use. */
+    // Restart is allowed only after the old workers and camera releases drain.
     std::atomic<bool> started_once_{false};
     std::atomic<bool> limit_reached_{false};
+    bool buffers_ready_ = false;
+    std::mutex lifecycle_mutex_;
+    platform::WriteControl* writes_ = nullptr;
+    pthread_t control_thread_{};
+    bool control_started_ = false;
+    std::atomic<bool> controlling_{false};
+    std::mutex control_mutex_;
+    std::condition_variable control_wake_;
 
     std::atomic<std::uint64_t> input_{0};
     std::atomic<std::uint64_t> accepted_{0};
@@ -215,6 +229,8 @@ inline bool Recorder::validate_config() noexcept {
 }
 
 inline bool Recorder::allocate_buffers() noexcept {
+    if (buffers_ready_)
+        return true;
     image_capacity_ = config_.queue_slots;
     image_slots_.reset(new (std::nothrow) ImageSlot[image_capacity_]);
     release_slots_.reset(new (std::nothrow) camera::FrameLease[image_capacity_]);
@@ -237,15 +253,19 @@ inline bool Recorder::allocate_buffers() noexcept {
         set_error(Error::kInvalidConfig);
         return false;
     }
+    buffers_ready_ = true;
     return true;
 }
 
 inline bool Recorder::start() noexcept {
-    if (started() || started_once_.load(std::memory_order_acquire)) {
+    std::lock_guard lifecycle(lifecycle_mutex_);
+    if (image_thread_started_ || events_.started() || pending_releases() != 0) {
         set_error(Error::kAlreadyStarted);
         return false;
     }
     error_.reset();
+    limit_reached_.store(false);
+    started_once_.store(false);
     if (!validate_config() || !allocate_buffers() || !session_.open() || !images_.open(error_)
         || !events_.open(session_, error_)) {
         (void)images_.close();
@@ -261,6 +281,12 @@ inline bool Recorder::start() noexcept {
         next_sample_tick_.store(0, std::memory_order_relaxed);
         accepting_ = true;
     }
+    // Statistics describe this file session, including its independent budget.
+    input_ = accepted_ = copied_ = written_ = downsampled_ = busy_ = stopped_ = invalid_ = 0;
+    copy_fail_ = write_fail_ = lease_release_fail_ = bytes_ = copy_total_us_ = 0;
+    pack_total_us_ = io_total_us_ = io_max_us_ = space_total_us_ = 0;
+    open_total_us_ = write_total_us_ = close_total_us_ = 0;
+    queue_high_water_ = 0;
     if (::pthread_create(&image_thread_, nullptr, &Recorder::image_thread_entry, this) != 0) {
         rollback_start();
         return false;
@@ -290,6 +316,20 @@ inline void Recorder::rollback_start() noexcept {
 }
 
 inline void Recorder::stop() noexcept {
+    {
+        std::lock_guard lock(control_mutex_);
+        controlling_.store(false);
+    }
+    control_wake_.notify_all();
+    if (control_started_) {
+        (void)::pthread_join(control_thread_, nullptr);
+        control_started_ = false;
+    }
+    stop_session();
+}
+
+inline void Recorder::stop_session() noexcept {
+    std::lock_guard lifecycle(lifecycle_mutex_);
     if (!started() && !image_thread_started_ && !events_.started())
         return;
     {
@@ -306,12 +346,54 @@ inline void Recorder::stop() noexcept {
     events_.stop();
 }
 
+inline bool Recorder::start_controlled(platform::WriteControl& writes) noexcept {
+    if (control_started_ || image_thread_started_ || !validate_config() || !allocate_buffers())
+        return false;
+    writes_ = &writes;
+    controlling_.store(true);
+    if (::pthread_create(&control_thread_, nullptr, &Recorder::control_entry, this) != 0) {
+        controlling_.store(false);
+        set_error(Error::kThread);
+        return false;
+    }
+    control_started_ = true;
+    return true;
+}
+
+inline void* Recorder::control_entry(void* context) noexcept {
+    auto& self = *static_cast<Recorder*>(context);
+    bool attempted = false;
+    while (self.controlling_.load()) {
+        const bool wanted = self.writes_->recording_enabled();
+        if (!wanted) {
+            self.stop_session();
+            attempted = false;
+        } else if (!attempted && self.pending_releases() == 0) {
+            // A failed or full session stays stopped until a fresh request.
+            attempted = true;
+            (void)self.start();
+        } else if (self.limit_reached() || self.last_error() != Error::kNone) {
+            self.stop_session();
+        }
+        std::unique_lock lock(self.control_mutex_);
+        self.control_wake_.wait_for(lock, std::chrono::milliseconds{20}, [&] {
+            return !self.controlling_.load();
+        });
+    }
+    return nullptr;
+}
+
 inline bool Recorder::started() const noexcept {
     std::lock_guard<std::mutex> lock(image_mutex_);
     return accepting_;
 }
 
 inline Admission Recorder::try_submit(camera::FrameLease&& lease) noexcept {
+    std::unique_lock lifecycle(lifecycle_mutex_, std::try_to_lock);
+    if (!lifecycle.owns_lock())
+        return Admission::kBusy;
+    if (writes_ != nullptr && !writes_->recording_enabled())
+        return Admission::kStopped;
     const std::uint64_t input_index = input_.fetch_add(1, std::memory_order_relaxed) + 1;
     const auto* view_ptr = lease.valid() ? &lease.view() : nullptr;
     FrameEvent event{};

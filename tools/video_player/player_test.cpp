@@ -32,9 +32,12 @@ public:
         test.correspondence();
         test.conflicts();
         test.invalid_csv();
+        test.empty_csv();
         test.gui();
         streams();
         png_frames();
+        flattened_recording();
+        session_collection();
         std::puts("video player: association, CSV, PGM/PBM, overlays, GUI and CLI passed");
     }
 
@@ -76,6 +79,197 @@ private:
         require(file.write(bytes) == bytes.size(), "write fixture");
     }
     static void write_text(const QString& path, const QString& text) { write(path, text.toUtf8()); }
+    static void session_collection() {
+        QTemporaryDir directory{QDir::tempPath() + "/dart recording collection-XXXXXX"};
+        require(directory.isValid(), "recording collection directory");
+        const QString root = directory.path();
+        const QString first = root + "/rec_2", second = root + "/rec_10";
+        const QString image = "img/b0000001/p0000001/00000001.png";
+        const QString header =
+            "input_index,source_sequence,source_pts,source_pts_timebase_validated,received_us,"
+            "decision,image_index,image_file,file_offset,file_bytes\n";
+        QImage png(9, 2, QImage::Format_Grayscale8);
+        png.fill(0);
+        for (const auto& session : {second, first}) {
+            require(
+                QDir(session).mkpath("img/b0000001/p0000001") && QDir(session).mkpath("logs"),
+                "collection session directories");
+            require(png.save(session + '/' + image), "collection PNG");
+            const QString identity = session == first ? "101,1000,0,100000" : "101,2000,0,200000";
+            write_text(
+                session + "/logs/frames.csv",
+                header + QStringLiteral("1,%1,accepted,1,%2,0,%3\n")
+                             .arg(identity, image)
+                             .arg(QFileInfo(session + '/' + image).size()));
+        }
+        require(QDir(root).mkpath("unrelated"), "unrelated collection subdirectory");
+        write_text(
+            root + "/detection.csv", detection_header() + detection_row("101", "100000", "1000")
+                                         + detection_row("101", "200000", "2000", false));
+        Recording recording;
+        QString error;
+        require(
+            recording.load_directory(root, std::nullopt, std::nullopt, {}, error),
+            "load session collection");
+        require(
+            recording.complete() && recording.frames().size() == 2
+                && recording.summary().contains("detection_matches=2"),
+            "collection keeps both repeated image indexes and filenames");
+        require(
+            recording.frames()[0].path.startsWith(first + '/')
+                && recording.frames()[1].path.startsWith(second + '/')
+                && recording.frames()[0].event->path == first + "/logs/frames.csv"
+                && recording.frames()[1].event->path == second + "/logs/frames.csv"
+                && recording.frames()[0].detection->value("source_pts") == "1000"
+                && recording.frames()[1].detection->value("source_pts") == "2000",
+            "sessions sort numerically and associate shared detections using their own recorder CSV");
+        require(
+            cli({"--check", "--png", root}, 0).contains("images=2 recorder_matches=2 detection_matches=2"),
+            "CLI accepts collection root");
+        require(
+            cli({"--check", root, first + "/logs/frames.csv"}, 1).contains("Multiple sessions"),
+            "one explicit recorder CSV cannot be reused across sessions");
+        cli({"--check", root, "", ""}, 1);
+        Player player(recording);
+        auto* slider = player.findChild<QSlider*>("frame_slider");
+        auto* info = player.findChild<QPlainTextEdit*>("frame_info");
+        require(slider && info && slider->maximum() == 1, "collection GUI frame range");
+        slider->setValue(1);
+        require(
+            info->toPlainText().contains(second + '/' + image)
+                && info->toPlainText().contains("source_pts: 2000")
+                && !info->toPlainText().contains("IMAGE ERROR"),
+            "GUI steps across the session boundary with matching image and metadata");
+
+        // Metadata availability is scoped per session, including repeated frame identities.
+        require(QFile::remove(root + "/detection.csv"), "remove shared detection CSV");
+        write_text(first + "/detection.csv", detection_header() + detection_row("101", "100000", "1000"));
+        require(
+            cli({"--check", root}, 0).contains("detection_matches=1"),
+            "one record-only session does not invalidate another session's detections");
+        write_text(
+            second + "/logs/frames.csv",
+            header + QStringLiteral("1,101,1000,0,100000,accepted,1,%1,0,%2\n")
+                         .arg(image)
+                         .arg(QFileInfo(second + '/' + image).size()));
+        write_text(second + "/detection.csv", detection_header() + detection_row("101", "100000", "1000", false));
+        require(
+            recording.load_directory(root, std::nullopt, std::nullopt, {}, error)
+                && recording.complete()
+                && recording.frames()[0].detection->value("valid") == "1"
+                && recording.frames()[1].detection->value("valid") == "0",
+            "local detection CSVs cannot cross-associate identical identities in separate sessions");
+        write(second + "/logs/frames.csv", {});
+        cli({"--check", root}, 1);
+
+        // A flat recording at the root remains a single recording.
+        require(png.save(root + "/00000001.png"), "flat image beside child sessions");
+        require(
+            recording.load_directory(root, std::nullopt, std::nullopt, {}, error)
+                && recording.frames().size() == 1
+                && recording.frames()[0].path == root + "/00000001.png",
+            "flat image directory takes precedence over child sessions");
+    }
+    static void flattened_recording() {
+        QTemporaryDir directory{QDir::tempPath() + "/dart flat recording-XXXXXX"};
+        require(directory.isValid(), "flattened recording directory");
+        const QString root = directory.path() + "/records";
+        require(
+            QDir(root).mkpath("b0000001/p0000001")
+                && QDir(root).mkpath("b0000001/p0000002")
+                && QDir(directory.path()).mkpath("logs"),
+            "flattened recording groups");
+        // Unrelated parent logs must not be selected for a flattened archive.
+        write(directory.path() + "/logs/frames.csv", "unrelated recorder CSV\n");
+        write(directory.path() + "/detection.csv", "unrelated detection CSV\n");
+        const QString a = "b0000001/p0000001/00000032.png";
+        const QString b = "b0000001/p0000002/00000033.png";
+        const QString c = "b0000001/p0000002/00000034.png";
+        QImage image(640, 480, QImage::Format_Mono);
+        image.setColorTable({qRgb(0, 0, 0), qRgb(255, 255, 255)});
+        image.fill(0);
+        image.setPixel(639, 479, 1);
+        for (const auto& name : {a, b, c})
+            require(image.save(root + '/' + name), "save monochrome PNG");
+        const QString header =
+            "# recorder format=2 width=640 height=480 fps=60 session=/data/app/records/rec_0001\n"
+            "input_index,source_sequence,source_pts,source_pts_timebase_validated,received_us,"
+            "decision,image_index,image_file,file_offset,file_bytes\n";
+        // Physical CSV order, input sequence and output image index are independent.
+        const QString rows = QStringLiteral(
+                                 "2,102,1001,0,110000,downsampled,0,,0,0\n"
+                                 "4,202,2001,0,210000,busy,0,,0,0\n"
+                                 "3,201,2000,0,200000,accepted,33,img/%1,0,%2\n"
+                                 "1,101,1000,0,100000,accepted,32,img/%3,0,%4\n")
+                                 .arg(b)
+                                 .arg(QFileInfo(root + '/' + b).size())
+                                 .arg(a)
+                                 .arg(QFileInfo(root + '/' + a).size());
+        write_text(root + "/frames.csv", header + rows);
+        const auto paths = RecordingPaths::resolve(root);
+        require(
+            paths.images == root && paths.frames_csv == root + "/frames.csv"
+                && paths.detection_csv == root + "/detection.csv",
+            "flattened archive resolves local metadata");
+        Recording recording;
+        QString error;
+        require(
+            recording.load(paths.images, paths.frames_csv, paths.detection_csv, {}, error),
+            "load flattened recording");
+        require(
+            recording.frames().size() == 3 && !recording.complete()
+                && recording.summary().contains("recorder_matches=2")
+                && recording.summary().contains("missing_images=0"),
+            "unlogged tail remains visible and incomplete");
+        const auto& first = recording.frames()[0];
+        const auto& second = recording.frames()[1];
+        require(
+            first.image_index == 32 && first.event && first.event->line == 6
+                && first.event->value("source_sequence") == "101" && second.event
+                && second.event->line == 5 && second.event->value("source_sequence") == "201",
+            "flattened groups match original img-prefixed paths in unordered CSV");
+        const QImage decoded = read_frame_image(first, error);
+        require(
+            decoded.size() == QSize(640, 480) && qRed(decoded.pixel(0, 0)) == 0
+                && qRed(decoded.pixel(639, 479)) == 255,
+            "one-bit PNG dimensions and polarity");
+        require(
+            !recording.frames()[2].event && !recording.frames()[2].notes.isEmpty(),
+            "unlogged image cannot borrow adjacent metadata");
+        const QString output = cli({"--check", root}, 1);
+        require(output.contains("recorder_matches=2"), "CLI discovers local frames.csv");
+        Player player(recording);
+        auto* slider = player.findChild<QSlider*>("frame_slider");
+        auto* info = player.findChild<QPlainTextEdit*>("frame_info");
+        require(slider && info, "flattened recording controls");
+        slider->setValue(1);
+        require(info->toPlainText().contains("source_sequence: 201"), "flat frame log in GUI");
+        slider->setValue(2);
+        require(
+            info->toPlainText().contains("no matching image_file")
+                && !info->toPlainText().contains("source_sequence:"),
+            "flat unlogged frame has its own diagnostic");
+        write(root + '/' + c, {}); // Interrupted recording may leave an empty final PNG.
+        slider->setValue(0);
+        slider->setValue(2);
+        require(
+            info->toPlainText().contains("IMAGE ERROR")
+                && !info->toPlainText().contains("source_sequence:"),
+            "empty unlogged PNG reports an image error without borrowed metadata");
+        require(image.save(root + '/' + c), "restore tail PNG");
+        const QString tail = QStringLiteral("5,301,3000,0,300000,accepted,34,img/%1,0,%2\n")
+                                 .arg(c)
+                                 .arg(QFileInfo(root + '/' + c).size());
+        write_text(root + "/frames.csv", header + rows + tail);
+        cli({"--check", "--png", root}, 0);
+        cli({"--check", root, root + "/frames.csv"}, 0);
+        write_text(
+            root + "/detection.csv",
+            detection_header() + detections() + detection_row("301", "300000", "3000"));
+        require(
+            cli({"--check", root}, 0).contains("detection_matches=3"),
+            "flattened archive discovers local detection CSV");
+    }
     static void png_frames() {
         QTemporaryDir directory;
         require(directory.isValid(), "PNG directory");
@@ -142,6 +336,23 @@ private:
                     && !recording.frames()[0].detection && recording.frames()[1].detection,
                 "PNG offset/size conflict must disable only the mismatched association");
         }
+        write_text(frames, csv_header + rows);
+        cli({"--check", root}, 0);
+        cli({"--check", root + "/img"}, 0);
+        require(QDir(root).mkpath("rec_0001"), "create original session layout");
+        require(
+            QDir(root).rename("img", "rec_0001/img")
+                && QDir(root).rename("logs", "rec_0001/logs"),
+            "move fixture into original session layout");
+        require(
+            cli({"--check", root + "/rec_0001"}, 0).contains("detection_matches=2"),
+            "original session discovers parent detection CSV");
+        cli({"--check", root + "/rec_0001/img"}, 0);
+        require(
+            QFile::rename(root + "/rec_0001/logs/frames.csv", root + "/rec_0001/frames.csv"),
+            "move CSV to session root");
+        cli({"--check", root + "/rec_0001"}, 0);
+        cli({"--check", root + "/rec_0001/img"}, 0);
     }
     static void streams() {
         for (const QString& extension : {QString("pgm"), QString("pbm")}) {
@@ -233,7 +444,7 @@ private:
             throw std::runtime_error(error.toStdString());
         return recording;
     }
-    void cli(const QStringList& args, int expected) const {
+    static QString cli(const QStringList& args, int expected) {
         QProcess process;
         auto env = QProcessEnvironment::systemEnvironment();
         env.insert("QT_QPA_PLATFORM", "intentionally_unavailable");
@@ -241,10 +452,11 @@ private:
         process.start(QCoreApplication::applicationDirPath() + "/video_player", args);
         require(process.waitForFinished(10000), "CLI finished without a display server");
         require(process.exitStatus() == QProcess::NormalExit, "CLI normal exit");
-        if (process.exitCode() != expected) {
-            throw std::runtime_error(
-                (process.readAllStandardError() + process.readAllStandardOutput()).toStdString());
-        }
+        const QString output =
+            QString::fromUtf8(process.readAllStandardOutput() + process.readAllStandardError());
+        if (process.exitCode() != expected)
+            throw std::runtime_error(output.toStdString());
+        return output;
     }
     void correspondence() {
         const auto recording = load();
@@ -282,6 +494,10 @@ private:
         cli({"--help-all"}, 0);
         cli({}, 2);
         cli({"--unknown"}, 2);
+        require(
+            cli({"--check", root()}, 0).contains("detection_matches=2"),
+            "session discovers its archived detection CSV");
+        cli({"--check", root() + "/img"}, 0);
         cli({"--check", root(), frames_path(), detection_path()}, 0);
         cli({"--check", root() + "/img", frames_path(), detection_path()}, 0);
         cli({"--check", root(), root() + "/missing.csv"}, 2);
@@ -344,6 +560,54 @@ private:
             !no_metadata.complete() && !no_metadata.frames().front().event,
             "missing recorder never falls back to line number");
         reset();
+    }
+    void empty_csv() {
+        const QString whitespace = "\n \t\r\n  # metadata pending\n\n";
+        for (const auto& content : {QString{}, whitespace, detection_header()}) {
+            write_text(detection_path(), content);
+            const auto recording = load();
+            require(
+                recording.complete() && recording.frames().front().event
+                    && !recording.frames().front().detection
+                    && recording.notes().join('\n').contains("no data rows"),
+                "empty detection CSV permits recorder-only viewing and checks");
+            const auto overlay = ImageView::overlay_for(recording.frames().front(), QSize(9, 2));
+            require(!overlay.center && !overlay.window, "empty detection CSV has no overlay");
+            cli({"--check", root()}, 0);
+            cli({"--check", root(), frames_path(), detection_path()}, 0);
+        }
+        reset();
+        for (const auto& content : {QString{}, whitespace, frames_header()}) {
+            write_text(frames_path(), content);
+            const auto recording = load();
+            require(
+                recording.frames().size() == 2 && !recording.complete()
+                    && !recording.frames().front().event && !recording.frames().front().detection
+                    && recording.notes().join('\n').contains("no data rows"),
+                "empty recorder CSV permits viewing without borrowing detection metadata");
+            cli({"--check", root(), frames_path(), detection_path()}, 1);
+        }
+        write(detection_path(), {});
+        const auto recording = load();
+        Player player(recording);
+        auto* slider = player.findChild<QSlider*>("frame_slider");
+        auto* info = player.findChild<QPlainTextEdit*>("frame_info");
+        require(slider && info, "image-only player controls");
+        slider->setValue(1);
+        require(
+            info->toPlainText().contains("frame_00000003.pbm")
+                && info->toPlainText().contains("no data rows")
+                && !info->toPlainText().contains("IMAGE ERROR")
+                && !info->toPlainText().contains("source_sequence:"),
+            "both empty CSVs permit image-only GUI stepping");
+        cli({"--check", root()}, 1);
+        reset();
+        require(
+            cli({"--check", root(), frames_path(), ""}, 0).contains("detection_matches=0"),
+            "empty detection argument disables default detection CSV");
+        require(
+            cli({"--check", root(), "", ""}, 1).contains("recorder_matches=0"),
+            "empty CSV arguments disable default metadata");
     }
     void invalid_csv() {
         QStringList fields;

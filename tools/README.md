@@ -12,8 +12,8 @@ bag 写入边界，无需创建 ROS package 或运行 colcon。
 1520 µs 中心、±100 µs 摆幅逐路和同时测试。显式运行
 `bash .script/build-rtos pwm_swing` / `bash .script/deploy-rtos pwm_swing` 构建与部署，
 板端手动启动后约 43 秒结束。
-当前 launcher 清单也启用了每次开机运行一轮的 PWM 测试，日志写到
-`/data/app/logs/pwm_swing.console.log`；开机部署与恢复业务步骤见该工具说明。
+当前 launcher 清单启用识别与录像，PWM 测试行已注释；按需手动测试时，
+开机配置与日志说明见该工具说明。
 
 ## 录像逐帧播放器
 

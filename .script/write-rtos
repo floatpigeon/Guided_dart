@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# 写入总开关：write-rtos off 暂停；write-rtos on 显式解除全部暂停。
+# 不等待板端应答；录像/日志在后台关闭或重新打开，相机与 IMU 继续运行。
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/_rtos-common.sh"
+[[ $# == 1 && ( "$1" == on || "$1" == off ) ]] || die "用法：write-rtos on|off"
+rtos_resolve_transport
+if [[ "$1" == off ]]; then
+    rtos_pause_writes manual || die "设置暂停失败"
+    info "已请求暂停录像与日志写入。"
+else
+    RTOS_PAUSE_PATH="${RTOS_DIR}/control/write.pause"
+    entries="$(rtos_list_entries "${RTOS_DIR}")" || die "无法读取程序目录"
+    have_control=0
+    while IFS=$'\t' read -r entry_kind name; do
+        [[ "${name}" != control || "${entry_kind}" != d ]] || have_control=1
+    done <<< "${entries}"
+    if [[ "${have_control}" == 0 ]]; then
+        info "当前没有暂停开关。"
+        exit 0
+    fi
+    entries="$(rtos_list_entries "${RTOS_DIR}/control")" || die "无法读取写入开关"
+    kind=''
+    while IFS=$'\t' read -r entry_kind name; do
+        [[ "${name}" != write.pause ]] || kind="${entry_kind}"
+    done <<< "${entries}"
+    if [[ -n "${kind}" ]]; then
+        rtos_remove "${RTOS_PAUSE_PATH}" || die "释放暂停失败"
+    fi
+    info "已解除暂停，按 runtime 当前请求恢复录像与日志写入。"
+fi

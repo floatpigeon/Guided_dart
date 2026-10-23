@@ -19,12 +19,13 @@ namespace dart::app {
 
 inline int run_services(
     const Arguments& args, platform::CameraFactory factory, platform::RunControl& control,
-    logging::Logger& log, imu::Session* imu_session = nullptr) noexcept {
+    logging::Logger& log, imu::Session* imu_session = nullptr,
+    platform::WriteControl* writes = nullptr) noexcept {
     log.line(
         "level=INFO module=app op=start version=4 exposure=fixed exp_lines=%u "
-        "vision=%d record=%d rec_fps=%u rec_keep=%u seconds=%u imu=%d "
+        "vision=%d record=%d record_auto=%d rec_fps=%u rec_keep=%u seconds=%u imu=%d "
         "capture=mcm_raw10 output=binary8 raw_layout=%u threshold=%u\n",
-        args.exposure_lines, args.vision_on, args.record_on, args.record_fps, args.record_keep,
+        args.exposure_lines, args.vision_on, args.record_on, args.record_auto, args.record_fps, args.record_keep,
         args.seconds, imu_session != nullptr, static_cast<unsigned>(args.raw10_layout),
         args.threshold);
     camera::Controls controls{};
@@ -37,7 +38,7 @@ inline int run_services(
         log_camera_error(log, "create", "disable_capture", created.error());
     } else {
         camera_failed =
-            CapturePipeline::execute(args, std::move(created.value()), control, log, imu_session)
+            CapturePipeline::execute(args, std::move(created.value()), control, log, imu_session, writes)
             != 0;
     }
     if (camera_failed) {

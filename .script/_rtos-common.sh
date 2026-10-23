@@ -211,6 +211,54 @@ rtos_ssh() {
     ssh -o ConnectTimeout=10 "${BOARD_USER}@${RTOS_TARGET}" "$@"
 }
 
+# Pause is an existence switch, outside the data-cleaning roots. Separate
+# holders keep simultaneous cleanup jobs from releasing each other's pause.
+# A manually uploaded ordinary write.pause file remains externally owned.
+rtos_pause_writes() {
+    local holder="${1:-cleanup.$$.${RANDOM}}" control="${RTOS_DIR}/control" entries kind name
+    RTOS_PAUSE_HOLD=''
+    RTOS_PAUSE_PATH="${control}/write.pause"
+    rtos_assert_safe_path "${RTOS_PAUSE_PATH}"
+    case "${RTOS_MODE}" in
+    scp) rtos_ssh "mkdir -p '${control}'" || return 1 ;;
+    mtp) gio mkdir -p "${control}" 2>/dev/null || rtos_list_entries "${control}" >/dev/null || return 1 ;;
+    card) mkdir -p "${control}" || return 1 ;;
+    esac
+    entries="$(rtos_list_entries "${control}")" || return 1
+    while IFS=$'\t' read -r kind name; do
+        [[ "${name}" == write.pause ]] || continue
+        [[ "${kind}" == d ]] || return 0
+    done <<< "${entries}"
+    case "${RTOS_MODE}" in
+    scp) rtos_ssh "mkdir -p '${RTOS_PAUSE_PATH}'" || return 1 ;;
+    mtp) gio mkdir -p "${RTOS_PAUSE_PATH}" 2>/dev/null || rtos_list_entries "${RTOS_PAUSE_PATH}" >/dev/null || return 1 ;;
+    card) mkdir -p "${RTOS_PAUSE_PATH}" || return 1 ;;
+    esac
+    local path="${RTOS_PAUSE_PATH}/${holder}"
+    entries="$(rtos_list_entries "${RTOS_PAUSE_PATH}")" || return 1
+    while IFS=$'\t' read -r kind name; do
+        [[ "${name}" != "${holder}" ]] || return 0
+    done <<< "${entries}"
+    case "${RTOS_MODE}" in
+    scp) rtos_ssh "set -C; printf 'paused\\n' > '${path}'" || return 1 ;;
+    mtp) printf 'paused\n' | gio save --create "${path}" || return 1 ;;
+    card) (set -C; printf 'paused\n' > "${path}") || return 1 ;;
+    esac
+    RTOS_PAUSE_HOLD="${path}"
+}
+
+rtos_release_write_pause() {
+    [[ -n "${RTOS_PAUSE_HOLD:-}" ]] || return 0
+    rtos_remove "${RTOS_PAUSE_HOLD}" || return 1
+    # Only remove an empty pause directory; another holder always wins.
+    case "${RTOS_MODE}" in
+    scp) rtos_ssh "rmdir '${RTOS_PAUSE_PATH}'" 2>/dev/null || true ;;
+    mtp) gio remove "${RTOS_PAUSE_PATH}" 2>/dev/null || true ;;
+    card) rmdir "${RTOS_PAUSE_PATH}" 2>/dev/null || true ;;
+    esac
+    RTOS_PAUSE_HOLD=''
+}
+
 # 输出：d/f/l<TAB>条目名。保留空格、包含隐藏文件，不跟随符号链接。
 rtos_list_entries() {
     local dir="$1" listing name size kind path

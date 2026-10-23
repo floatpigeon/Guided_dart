@@ -238,6 +238,7 @@ endif()
 # System adapters: process lifetime, logging and filesystem implementation.
 # ---------------------------------------------------------------------------
 add_library(dart_platform INTERFACE)
+target_link_libraries(dart_platform INTERFACE Threads::Threads)
 target_compile_features(dart_platform INTERFACE cxx_std_23)
 target_compile_options(dart_platform INTERFACE
     -Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti)

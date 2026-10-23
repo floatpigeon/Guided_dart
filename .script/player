@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Build and run the host recording viewer. Arguments are passed through unchanged.
+# Usage: player [options] recording [frames.csv] [detection.csv]
+# Empty CSV arguments skip that metadata; empty files allow image-only viewing.
 set -euo pipefail
 
 PLAYER_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

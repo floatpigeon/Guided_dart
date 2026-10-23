@@ -106,9 +106,11 @@ inline int with_imu(
     log.line(
         "level=INFO module=imu op=initialize model=%s device_id=0x%02x result=ok\n",
         dart_iim42652_device_name(diagnostic.observed_device_id), diagnostic.observed_device_id);
-    storage::ensure_parent(options.log_path);
+    if (options.writes == nullptr || options.writes->logging_enabled())
+        storage::ensure_parent(options.log_path);
     imu::Session session{device};
-    if (!session.start(options.log_path, 1000, true)) {
+    if (!session.start(options.log_path, 1000, true, imu::Session::kDefaultLogLimitBytes,
+                       options.writes, options.sample_observer, options.sample_observer_context)) {
         log.line("level=ERROR module=imu op=start path=%s action=disable_imu\n", options.log_path);
         return service(nullptr);
     }

@@ -10,17 +10,24 @@
 
 #include "storage/directories.cpp"
 #include "system/monotonic_clock.cpp"
+#include "system/write_control.cpp"
 
 namespace dart::logging {
 
 /* File logging only. A failed log write must not become a console error loop. */
 class Logger {
 public:
+    explicit Logger(platform::WriteControl* writes = nullptr) noexcept : writes_(writes) {}
+    ~Logger() { end_batch(); }
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
     bool open(std::string_view path) noexcept {
         if (path.empty() || path.size() >= sizeof(path_))
             return false;
         std::memcpy(path_, path.data(), path.size());
         path_[path.size()] = '\0';
+        if (writes_ != nullptr && !writes_->logging_enabled())
+            return true;
         storage::ensure_parent(path_);
         const int fd = ::open(path_, O_WRONLY | O_CREAT | O_APPEND, 0666);
         if (fd < 0)
@@ -41,6 +48,10 @@ public:
     }
 
     void line(const char* fmt, ...) noexcept {
+        if (writes_ != nullptr && !writes_->logging_enabled()) {
+            end_batch();
+            return;
+        }
         char body[512];
         char out[640];
         va_list ap;
@@ -55,8 +66,10 @@ public:
             return;
         if (static_cast<std::size_t>(out_n) >= sizeof(out))
             out_n = static_cast<int>(sizeof(out)) - 1;
-        if (fd_ < 0 && path_[0] != '\0')
+        if (fd_ < 0 && path_[0] != '\0') {
+            storage::ensure_parent(path_);
             fd_ = ::open(path_, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        }
         if (fd_ >= 0) {
             (void)!::write(fd_, out, static_cast<std::size_t>(out_n));
             if (!batching_)
@@ -65,6 +78,7 @@ public:
     }
 
 private:
+    platform::WriteControl* writes_ = nullptr;
     char path_[512]{};
     int fd_ = -1;
     bool batching_ = false;

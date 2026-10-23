@@ -366,6 +366,36 @@ public:
         assert(!full.start((path.parent_path() / "disk-error.log").c_str()));
         fail_log_writes.store(false);
         assert(full.stats().io_errors > 0);
+
+        // An active logging fault closes only the log. Acquisition survives and
+        // a later off/on request creates another numbered file on this session.
+        platform::WriteControl writes;
+        assert(writes.start((path.parent_path() / "write.pause").c_str()));
+        Source fault_source;
+        imu::Session fault{fault_source};
+        const auto fault_path = path.parent_path() / "fault.log";
+        assert(fault.start(fault_path.c_str(), 1000, false,
+                           imu::Session::kDefaultLogLimitBytes, &writes));
+        fail_log_writes.store(true);
+        for (int i = 0; i < 500 && fault.stats().io_errors == 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        assert(fault.stats().io_errors > 0);
+        fail_log_writes.store(false);
+        sample = {};
+        sample.acceleration_m_s2.z = 9.80665F;
+        sample.timestamp_ns = 4'000'000'000;
+        assert(feed(fault, fault_source, sample).sample_accepted);
+        writes.request_logging(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        writes.request_logging(true);
+        const auto resumed_fault_path = path.parent_path() / "fault_000002.log";
+        for (int i = 0; i < 500 && !std::filesystem::exists(resumed_fault_path); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        assert(std::filesystem::exists(resumed_fault_path));
+        sample.timestamp_ns += 10'000'000;
+        assert(feed(fault, fault_source, sample).sample_accepted);
+        fault.stop();
+        assert(read(resumed_fault_path).starts_with("# imu_log version=1"));
         std::filesystem::remove_all(directory);
     }
 };
