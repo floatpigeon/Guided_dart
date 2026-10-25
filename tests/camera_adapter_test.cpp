@@ -159,7 +159,6 @@ void automatic_mode() {
         && fake.config.sensor_fps == 0);
     assert(fake.config.output_width == 0 && fake.config.output_height == 0);
     assert(fake.config.max_outstanding_frames == 4 && fake.config.channel_buffers >= 4);
-    assert(fake.config.binary_threshold == 50);
     assert(fake.config.raw10_layout == DART_CAMERA_RAW10_PACKED_LSB);
     assert(created.value()->frame_info().width == 320);
     assert(created.value()->frame_info().height == 240);

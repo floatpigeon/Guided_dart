@@ -46,13 +46,17 @@ public:
         float association_k = 0.6F;
         float association_min_px = 4.0F;
         std::uint32_t track_hold = 2;
+        std::uint32_t confirm_frames = 2;
+        float min_brightness_ratio = 0.45F;
+        float min_gap_contrast = 8.0F;
     };
     ArmorDetector() noexcept;
     explicit ArmorDetector(Config config) noexcept;
     bool ValidConfig() const noexcept;
     Target Detect(
         std::span<const Blob> blobs, const Target& light,
-        const Target* previous = nullptr) const noexcept;
+        const Target* previous = nullptr, const camera::FrameView* frame = nullptr,
+        bool associated_only = false, std::array<Blob, 2>* selected = nullptr) const noexcept;
     Rect
         SearchWindow(const Target& light, std::uint32_t width, std::uint32_t height) const noexcept;
 
@@ -84,8 +88,7 @@ private:
     }
 
     static bool MakeBar(
-        const Config& config, const Blob& blob, float scale, Bar& bar,
-        bool tracking = false) noexcept {
+        const Config& config, const Blob& blob, float scale, Bar& bar) noexcept {
         const float minimum = std::max(
             static_cast<float>(config.length_floor), std::floor(config.length_min_k * scale));
         const float maximum = std::max(minimum, std::floor(config.length_max_k * scale));
@@ -110,11 +113,11 @@ private:
         // confirmation is the gate. Keep only the area/pixel floor above.
         const bool far = static_cast<float>(std::max(blob.bounds.width, blob.bounds.height))
                        < static_cast<float>(config.tiny_px);
-        if (!tracking && !far && (bar.length < minimum || bar.length > maximum))
+        if (!far && (bar.length < minimum || bar.length > maximum))
             return false;
         const float degrees = std::fabs(angle) * kDegrees;
         const float skew = std::min(degrees, std::fabs(90.0F - degrees));
-        if (!tracking && !far) {
+        if (!far) {
             if (bar.length < config.aspect_min * bar.thickness)
                 return false;
             if (skew <= config.flat_deg && blob.fill < config.fill_min)
@@ -174,6 +177,29 @@ private:
             std::max(a.y + a.height, b.y + b.height) - y};
     }
 
+    static float GapLuma(const camera::FrameView& frame, const Bar& a, const Bar& b) noexcept {
+        const auto offset = Delta(b.center, a.center);
+        const float separation = std::fabs(Cross(offset, a.axis));
+        const float lo = std::min(0.45F, a.thickness * 0.5F / separation);
+        const float hi = 1.0F - std::min(0.45F, b.thickness * 0.5F / separation);
+        float sum = 0.0F;
+        // Nine samples inside the gap, away from the bars and their end caps.
+        for (int row = -1; row <= 1; ++row) {
+            for (int col = 1; col <= 3; ++col) {
+                const float t = lo + (hi - lo) * col * 0.25F;
+                const float along = row * std::min(a.length, b.length) * 0.25F;
+                const auto x = static_cast<std::uint32_t>(std::clamp(
+                    std::round(a.center.x + offset.x * t + a.axis.x * along),
+                    0.0F, static_cast<float>(frame.width - 1)));
+                const auto y = static_cast<std::uint32_t>(std::clamp(
+                    std::round(a.center.y + offset.y * t + a.axis.y * along),
+                    0.0F, static_cast<float>(frame.height - 1)));
+                sum += std::to_integer<std::uint8_t>(frame.luma[static_cast<std::size_t>(y) * frame.stride + x]);
+            }
+        }
+        return sum / 9.0F;
+    }
+
     Config config_;
 };
 
@@ -193,22 +219,29 @@ inline bool ArmorDetector::ValidConfig() const noexcept {
         && config_.length_floor > 0 && config_.area_floor > 0
         && config_.length_min_k <= config_.length_max_k && config_.span_min_k <= config_.span_max_k
         && config_.diagonal_min_sin <= 1.0F && config_.plate_up_lo_pct <= config_.plate_up_hi_pct
-        && config_.plate_offx_pct > 0 && config_.track_hold > 0
+        && config_.plate_offx_pct > 0 && config_.track_hold > 0 && config_.confirm_frames > 0
         && IsFraction(config_.thickness_ratio) && IsFraction(config_.length_ratio)
         && IsFraction(config_.overlap) && std::isfinite(config_.window_gap_k)
         && config_.window_gap_k >= 0.0F && std::isfinite(config_.border_penalty)
         && config_.border_penalty >= 0.0F && std::isfinite(config_.flat_deg)
         && config_.flat_deg >= 0.0F && config_.flat_deg <= 45.0F
-        && IsPositive(config_.parallel_deg) && config_.parallel_deg < 90.0F;
+        && IsPositive(config_.parallel_deg) && config_.parallel_deg < 90.0F
+        && IsFraction(config_.min_brightness_ratio) && std::isfinite(config_.min_gap_contrast)
+        && config_.min_gap_contrast >= 0.0F && config_.min_gap_contrast <= 255.0F;
 }
 
 // Both selectors read measured candidates. The current light anchors the armor
 // search above it; an old target is used only for association.
 inline Target ArmorDetector::Detect(
-    std::span<const Blob> blobs, const Target& light, const Target* previous) const noexcept {
+    std::span<const Blob> blobs, const Target& light, const Target* previous,
+    const camera::FrameView* frame, bool associated_only, std::array<Blob, 2>* selected) const noexcept {
     if (!light.valid || !IsPositive(light.radius)
         || blobs.size() > BlobWorkspace::Config::kMaxCandidates)
         return {};
+    if (associated_only && (!previous || !previous->valid)) return {};
+    if (frame && (frame->width == 0 || frame->height == 0 || frame->stride < frame->width
+        || frame->luma.data() == nullptr || static_cast<std::uint64_t>(frame->height - 1)
+            * frame->stride + frame->width > frame->luma.size())) return {};
     // Candidate coordinates come from a validated workspace (at most 65535).
     const Rect window = SearchWindow(light, 65535, 65535);
     const float scale = 2.0F * light.radius;
@@ -221,10 +254,19 @@ inline Target ArmorDetector::Detect(
             || blob.center.y < static_cast<float>(window.y)
             || blob.center.y >= static_cast<float>(window.y + window.height))
             continue;
-        if (MakeBar(config_, blob, scale, bars[count], previous && previous->valid))
+        if (associated_only) {
+            const float margin = std::max(config_.association_min_px,
+                config_.association_k * std::max(previous->bounds.width, previous->bounds.height));
+            if (blob.bounds.x + blob.bounds.width < previous->bounds.x - margin
+                || blob.bounds.y + blob.bounds.height < previous->bounds.y - margin
+                || blob.bounds.x > previous->bounds.x + previous->bounds.width + margin
+                || blob.bounds.y > previous->bounds.y + previous->bounds.height + margin) continue;
+        }
+        if (MakeBar(config_, blob, scale, bars[count]))
             ++count;
     }
     Target best{}, associated{};
+    std::array<Blob, 2> best_pair{}, associated_pair{};
     float best_score = std::numeric_limits<float>::infinity(), associated_score = best_score;
     const float parallel = std::cos(config_.parallel_deg / kDegrees);
     for (std::size_t i = 0; i < count; ++i) {
@@ -253,8 +295,19 @@ inline Target ArmorDetector::Detect(
                 continue;
             if (!PlateAnchorOk(config_, center, light))
                 continue;
+            float brightness_ratio = 1.0F, gap_contrast = 0.0F, gap_quality = 1.0F;
+            if (frame) {
+                const float bright = std::max(a.blob->contrast, b.blob->contrast);
+                const float dim = std::min(a.blob->contrast, b.blob->contrast);
+                brightness_ratio = bright > 0.0F ? std::clamp(dim / bright, 0.0F, 1.0F) : 0.0F;
+                gap_contrast = std::min(a.blob->mean_luma, b.blob->mean_luma) - GapLuma(*frame, a, b);
+                if (brightness_ratio < config_.min_brightness_ratio
+                    || gap_contrast < config_.min_gap_contrast) continue;
+                gap_quality = std::clamp(gap_contrast / std::max(1.0F, dim), 0.0F, 1.0F);
+            }
             const float score =
                 ((longest - shortest) + along) * 100.0F / longest
+                + (1.0F - brightness_ratio) * 25.0F + (1.0F - gap_quality) * 25.0F
                 + static_cast<float>(config_.border_penalty)
                       * (static_cast<float>(a.blob->clipped) + static_cast<float>(b.blob->clipped));
             const Rect bounds = UniteBounds(a.blob->bounds, b.blob->bounds);
@@ -266,11 +319,17 @@ inline Target ArmorDetector::Detect(
                 bounds,
                 area,
                 std::sqrt(static_cast<float>(area) / static_cast<float>(kPi)),
-                clipped ? 0.25F : 1.0F,
-                clipped};
+                std::min(a.blob->gray_quality, b.blob->gray_quality) * brightness_ratio
+                    * gap_quality * (clipped ? 0.25F : 1.0F),
+                clipped,
+                std::min(a.blob->contrast, b.blob->contrast),
+                std::min(a.blob->snr, b.blob->snr),
+                std::min(a.blob->stability, b.blob->stability), brightness_ratio, gap_contrast,
+                a.blob->stability_checked && b.blob->stability_checked};
             if (score < best_score || (score == best_score && area > best.area)) {
                 best = target;
                 best_score = score;
+                if (selected) best_pair = {*a.blob, *b.blob};
             }
             if (previous && previous->valid) {
                 const Point change = Delta(center, previous->center);
@@ -281,14 +340,18 @@ inline Target ArmorDetector::Detect(
                 const float size = static_cast<float>(std::max(bounds.width, bounds.height));
                 if (Dot(change, change) <= tolerance * tolerance
                     && size >= old_size * 0.5F && size <= old_size * 2.0F
-                    && score < associated_score) {
+                    && score + 100.0F * Dot(change, change) / (tolerance * tolerance) < associated_score) {
                     associated = target;
-                    associated_score = score;
+                    associated_score = score + 100.0F * Dot(change, change) / (tolerance * tolerance);
+                    if (selected) associated_pair = {*a.blob, *b.blob};
                 }
             }
         }
     }
-    return associated.valid ? associated : best;
+    if (associated.valid) { if (selected) *selected = associated_pair; return associated; }
+    if (associated_only) return {};
+    if (selected && best.valid) *selected = best_pair;
+    return best;
 }
 
 inline Rect ArmorDetector::SearchWindow(

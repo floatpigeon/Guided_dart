@@ -17,6 +17,12 @@ public:
     float radius = 0.0F;
     float quality = 0.0F;
     bool clipped = false;
+    float contrast = 0.0F;
+    float snr = 0.0F;
+    float stability = 0.0F;
+    float brightness_ratio = 0.0F;
+    float gap_contrast = 0.0F;
+    bool stability_checked = false;
 };
 
 class FrameMetadata {
@@ -27,12 +33,18 @@ public:
     bool source_pts_timebase_validated = false;
 };
 
+enum class DetectionPhase : std::uint8_t { kDetect, kTrack };
+
 class ScanMetadata {
 public:
     Rect search_window{};
     bool full_frame = false;
     bool rescanned = false;
     std::uint32_t candidates = 0;
+    std::uint32_t rejected_contrast = 0, rejected_snr = 0, rejected_stability = 0;
+    DetectionPhase phase = DetectionPhase::kDetect;
+    bool full_validation = false;
+    std::uint32_t stability_checks = 0;
 };
 
 enum class TargetKind : std::uint8_t { kNone, kLight, kArmor };

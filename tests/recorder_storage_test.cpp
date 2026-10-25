@@ -138,7 +138,7 @@ private:
         assert(limited.open() && limited.file_limit_bytes() == 1234);
 
         const std::array<std::byte, 64> pixels{};
-        for (const auto format : {recorder::ImageFormat::kPng, recorder::ImageFormat::kPgm,
+        for (const auto format : {recorder::ImageFormat::kDbv, recorder::ImageFormat::kPng, recorder::ImageFormat::kPgm,
                                   recorder::ImageFormat::kPbm}) {
             config.image_format = format;
             used_bytes = 0;

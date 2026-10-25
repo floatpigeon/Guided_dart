@@ -19,7 +19,7 @@ struct dart_camera {
     dart_camera_output_pool_t output_pool;
     int32_t raw_pool_id;
     uint32_t raw_stride;
-    uint8_t* binary_frames;
+    uint8_t* gray_frames;
     uint8_t sensor_powered;
     uint8_t sensor_streaming;
     k_vicap_sensor_type sensor_type;
@@ -29,7 +29,7 @@ struct dart_camera {
     uint8_t exposure_configured;
     /* RAW dumps are released immediately after conversion. frame_held tracks
      * only in-progress/failed releases, which must drain before stream stop.
-     * Public leases independently retain their per-slot binary CPU buffers.
+     * Public leases independently retain their per-slot gray CPU buffers.
      */
     uint8_t frame_held[DART_CAMERA_MAX_OUTSTANDING_FRAMES];
     k_video_frame_info frame_info[DART_CAMERA_MAX_OUTSTANDING_FRAMES];
@@ -63,7 +63,7 @@ static inline k_vicap_dump_format dart_camera_dump_format(const dart_camera_t* c
 static inline uint32_t dart_camera_buffer_count(const dart_camera_t* camera) {
     (void)camera;
     /* The checked kernel has a fixed four-entry MCM ring. buff_num must never
-     * exceed that array, irrespective of the number of binary lease slots. */
+     * exceed that array, irrespective of the number of gray lease slots. */
     return VICAP_MCM_FRAME_COUNT;
 }
 

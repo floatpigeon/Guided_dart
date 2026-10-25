@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "csv.cpp"
+#include "binary_stream.cpp"
 #include "recording_paths.cpp"
 #include "recording_types.cpp"
 
@@ -49,6 +50,7 @@ public:
 
 private:
     bool append_stream(const QFileInfo& file_info, QString& error);
+    bool append_binary(const QFileInfo& file_info, QString& error);
     std::vector<Frame> frames_;
     QStringList notes_;
     std::size_t event_matches_ = 0;
@@ -85,6 +87,62 @@ inline bool Recording::load_directory(
         frames_.insert(
             frames_.end(), std::make_move_iterator(recording.frames_.begin()),
             std::make_move_iterator(recording.frames_.end()));
+    }
+    return true;
+}
+
+inline bool Recording::append_binary(const QFileInfo& file_info, QString& error) {
+    QFile file(file_info.absoluteFilePath());
+    if (!file.open(QIODevice::ReadOnly)) {
+        error = file_info.absoluteFilePath() + ": " + file.errorString();
+        return false;
+    }
+    const auto header = file.read(recorder::BinaryFormat::kHeaderBytes);
+    if (header.size() < static_cast<int>(recorder::BinaryFormat::kHeaderBytes)) {
+        notes_ << file_info.absoluteFilePath() + QStringLiteral(": incomplete binary header ignored");
+        return true;
+    }
+    quint32 width = 0, height = 0;
+    if (!recorder::BinaryFormat::geometry(BinaryStream::bytes(header), width, height)) {
+        error = file_info.absoluteFilePath() + QStringLiteral(": invalid binary recording header");
+        return false;
+    }
+    const auto packed = recorder::BinaryFormat::packed_bytes(width, height);
+    quint64 index = 1;
+    qint64 key = -1, changed = -1;
+    while (file.pos() < file.size()) {
+        const auto offset = file.pos();
+        quint32 code = 0;
+        const auto prefix = BinaryStream::prefix(file, code);
+        if (prefix == 0 || (prefix > 0 && (code >> 2U) > file.size() - file.pos())) {
+            notes_ << file_info.absoluteFilePath() + QStringLiteral(": incomplete final frame ignored");
+            break;
+        }
+        if (prefix < 0 || !recorder::BinaryFormat::valid(code, packed, key >= 0)) {
+            error = QStringLiteral("%1:%2: invalid binary frame header")
+                        .arg(file_info.absoluteFilePath()).arg(offset);
+            return false;
+        }
+        const auto kind = code & 3U;
+        if (kind == recorder::BinaryFormat::kRaw || kind == recorder::BinaryFormat::kFull)
+            key = offset;
+        if (code != 0)
+            changed = offset;
+        Frame frame;
+        frame.image_index = index++;
+        frame.path = file_info.absoluteFilePath();
+        frame.file_offset = offset == static_cast<qint64>(recorder::BinaryFormat::kHeaderBytes)
+                                ? 0 : offset;
+        frame.file_bytes = offset + prefix + (code >> 2U) - frame.file_offset;
+        frame.binary_key_offset = key;
+        frame.binary_decode_offset = changed;
+        frame.binary_width = width;
+        frame.binary_height = height;
+        frames_.push_back(std::move(frame));
+        if (!file.seek(file.pos() + (code >> 2U))) {
+            error = file.errorString();
+            return false;
+        }
     }
     return true;
 }
@@ -156,6 +214,11 @@ inline bool Recording::load(
         const QString relative = image_dir.relativeFilePath(file.absoluteFilePath());
         if (!extension.isEmpty() && file.suffix() != extension)
             continue;
+        if (relative == "recording.dbv") {
+            if (!append_binary(file, error))
+                return false;
+            continue;
+        }
         if (relative == "recording.pgm" || relative == "recording.pbm") {
             if (!append_stream(file, error))
                 return false;
@@ -176,7 +239,7 @@ inline bool Recording::load(
         return a.image_index != b.image_index ? a.image_index < b.image_index : a.path < b.path;
     });
     if (frames_.empty()) {
-        error = image_directory + QStringLiteral(": no PNG/PGM/PBM frames found");
+        error = image_directory + QStringLiteral(": no DBV/PNG/PGM/PBM frames found");
         return false;
     }
 
@@ -198,7 +261,7 @@ inline bool Recording::load(
     std::map<QString, std::vector<const CsvRow*>> by_image;
     const QRegularExpression image_name(QStringLiteral(
         "^img/((?:(?:part_[0-9]{6}|b[0-9]{7}/p[0-9]{7})/"
-        ")?(?:frame_)?[0-9]+\\.(pgm|pbm|png)|recording\\.(pgm|pbm))$"));
+        ")?(?:frame_)?[0-9]+\\.(pgm|pbm|png)|recording\\.(pgm|pbm|dbv))$"));
     for (const CsvRow& row : events) {
         if (!frame_identity(row, "source_sequence")) {
             error = row.location() + QStringLiteral(": invalid frame identity");
@@ -212,7 +275,8 @@ inline bool Recording::load(
             return false;
         }
         QString key = name;
-        if (name == "img/recording.pgm" || name == "img/recording.pbm") {
+        if (name == "img/recording.pgm" || name == "img/recording.pbm"
+            || name == "img/recording.dbv") {
             const auto offset = unsigned_value(row.value("file_offset"));
             const auto bytes = unsigned_value(row.value("file_bytes"));
             if (!offset || !bytes || *bytes == 0) {

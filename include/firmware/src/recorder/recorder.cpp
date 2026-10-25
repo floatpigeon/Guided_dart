@@ -341,7 +341,7 @@ inline void Recorder::stop_session() noexcept {
         (void)::pthread_join(image_thread_, nullptr);
         image_thread_started_ = false;
     }
-    // PNG metadata is produced after the complete file has been closed. Keep
+    // Variable-size image metadata is produced by the image writer. Keep
     // its consumer alive until the image worker has drained its queue.
     events_.stop();
 }
@@ -456,8 +456,8 @@ inline Admission Recorder::try_submit(camera::FrameLease&& lease) noexcept {
     // Reserve space for queued frames as well as frames already written. The
     // final complete frame stops admission; no overflowing frame is accepted.
     const auto record_bytes =
-        config_.image_format == ImageFormat::kPng ? 0 : images_.record_bytes();
-    if (config_.image_format != ImageFormat::kPng
+        config_.variable_record_size() ? 0 : images_.record_bytes();
+    if (!config_.variable_record_size()
         && record_bytes > session_.file_limit_bytes() - reserved_file_bytes_) {
         accepting_ = false;
         limit_reached_.store(true, std::memory_order_release);
@@ -482,7 +482,7 @@ inline Admission Recorder::try_submit(camera::FrameLease&& lease) noexcept {
     slot.event = event;
     slot.event.decision = EventDecision::kAccepted;
     slot.event.image_index = next_image_index_++;
-    if (config_.image_format != ImageFormat::kPng) {
+    if (!config_.variable_record_size()) {
         slot.event.file_offset = reserved_file_bytes_;
         slot.event.file_bytes = record_bytes;
         reserved_file_bytes_ += record_bytes;
@@ -498,13 +498,13 @@ inline Admission Recorder::try_submit(camera::FrameLease&& lease) noexcept {
     const auto high = std::max(queue_high_water_.load(std::memory_order_relaxed), image_count_);
     queue_high_water_.store(high, std::memory_order_relaxed);
     event = slot.event;
-    if (config_.image_format != ImageFormat::kPng
+    if (!config_.variable_record_size()
         && record_bytes > session_.file_limit_bytes() - reserved_file_bytes_) {
         accepting_ = false;
         limit_reached_.store(true, std::memory_order_release);
     }
     lock.unlock();
-    if (config_.image_format != ImageFormat::kPng)
+    if (!config_.variable_record_size())
         (void)events_.enqueue(event);
     accepted_.fetch_add(1, std::memory_order_relaxed);
     image_cv_.notify_one();
@@ -569,19 +569,20 @@ inline void Recorder::image_loop() noexcept {
                     std::memory_order_relaxed);
                 written_.fetch_add(1, std::memory_order_relaxed);
                 bytes_.fetch_add(images_.record_bytes(), std::memory_order_relaxed);
-                if (config_.image_format == ImageFormat::kPng) {
+                if (config_.variable_record_size()) {
+                    event.file_offset = images_.file_offset();
                     event.file_bytes = images_.record_bytes();
                     (void)std::snprintf(
                         event.image_name.data(), event.image_name.size(), "%s",
                         images_.image_name());
                 }
-                if (config_.image_format == ImageFormat::kPng
+                if (config_.variable_record_size()
                     && bytes_.load(std::memory_order_relaxed) == session_.file_limit_bytes()) {
                     limit_reached_.store(true, std::memory_order_release);
                     write_failed = true;
                 }
             } else {
-                if (config_.image_format == ImageFormat::kPng && errno == EFBIG) {
+                if (config_.variable_record_size() && errno == EFBIG) {
                     limit_reached_.store(true, std::memory_order_release);
                 } else {
                     write_fail_.fetch_add(1, std::memory_order_relaxed);
@@ -597,7 +598,7 @@ inline void Recorder::image_loop() noexcept {
             event.decision = EventDecision::kStopped;
             event.image_index = 0;
         }
-        if (config_.image_format == ImageFormat::kPng)
+        if (config_.variable_record_size())
             (void)events_.enqueue(event);
         {
             std::lock_guard<std::mutex> lock(image_mutex_);

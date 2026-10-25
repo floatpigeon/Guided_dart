@@ -5,10 +5,12 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QImageReader>
 #include <QLabel>
 #include <QMainWindow>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QShortcut>
 #include <QSlider>
 #include <QSplitter>
@@ -58,6 +60,22 @@ public:
         slider_->setObjectName(QStringLiteral("frame_slider"));
         slider_->setRange(0, static_cast<int>(recording_.frames().size()) - 1);
         layout->addWidget(slider_);
+        auto* export_button = new QPushButton(QStringLiteral("Export current frame as PNG"), central);
+        layout->addWidget(export_button);
+        connect(export_button, &QPushButton::clicked, this, [this] {
+            const auto& frame = recording_.frames().at(static_cast<std::size_t>(slider_->value()));
+            const auto destination = QFileDialog::getSaveFileName(
+                this, QStringLiteral("Export frame"),
+                QStringLiteral("%1.png").arg(frame.image_index, 8, 10, QChar('0')),
+                QStringLiteral("PNG images (*.png)"));
+            if (destination.isEmpty())
+                return;
+            QString error;
+            const auto image = read_frame_image(frame, error);
+            const bool saved = !image.isNull() && image.save(destination, "PNG");
+            statusBar()->showMessage(saved ? QStringLiteral("Saved ") + destination
+                                          : QStringLiteral("Export failed: ") + error);
+        });
         setCentralWidget(central);
         connect(slider_, &QSlider::valueChanged, this, [this](int value) { show_frame(value); });
         view_->clicked = [this](int x, int y) {
@@ -129,13 +147,16 @@ inline int run_application(int argc, char** argv) {
     // Parse/help/check need no window system. Construct QApplication only for the viewer.
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral(
-        "Host frame viewer for grouped PNG/PGM/PBM recordings and recorder CSV.\n"
+        "Host frame viewer for compact DBV and PNG/PGM/PBM recordings and recorder CSV.\n"
         "Accepts a directory of rec_NNNN sessions, a single session, or an image directory.\n"
         "Port of k230_v1 tools/video_player; manual stepping, no timed playback."));
     parser.addHelpOption();
     parser.addOption(QCommandLineOption({"f", "pbm"}, "Show only frame_*.pbm."));
     parser.addOption(QCommandLineOption({"r", "pgm"}, "Show only frame_*.pgm."));
     parser.addOption(QCommandLineOption("png", "Show only independent PNG frames."));
+    parser.addOption(QCommandLineOption("dbv", "Show only compact binary recordings."));
+    parser.addOption(QCommandLineOption(
+        "export-png", "Export all frames as PNG without opening GUI.", "directory"));
     parser.addOption(
         QCommandLineOption("check", "Check metadata associations without opening GUI."));
     parser.addPositionalArgument(
@@ -155,7 +176,9 @@ inline int run_application(int argc, char** argv) {
     const auto positional = parser.positionalArguments();
     const bool valid =
         !positional.isEmpty() && positional.size() <= 3
-        && (int(parser.isSet("f")) + int(parser.isSet("r")) + int(parser.isSet("png")) <= 1);
+        && (int(parser.isSet("f")) + int(parser.isSet("r")) + int(parser.isSet("png"))
+            + int(parser.isSet("dbv")) <= 1)
+        && !(parser.isSet("check") && parser.isSet("export-png"));
     const bool wants_help = parser.isSet("help") || parser.isSet("help-all");
     if (!parsed || wants_help || !valid) {
         QCoreApplication app(argc, argv); // helpText needs an application, but no GUI plugin.
@@ -166,7 +189,7 @@ inline int run_application(int argc, char** argv) {
         return help ? 0 : 2;
     }
     std::unique_ptr<QCoreApplication> application;
-    if (parser.isSet("check"))
+    if (parser.isSet("check") || parser.isSet("export-png"))
         application = std::make_unique<QCoreApplication>(argc, argv);
     const std::optional<QString> frames_csv =
         positional.size() > 1 ? std::optional<QString>{positional.at(1)} : std::nullopt;
@@ -183,6 +206,7 @@ inline int run_application(int argc, char** argv) {
     const QString extension = parser.isSet("f")   ? "pbm"
                             : parser.isSet("r")   ? "pgm"
                             : parser.isSet("png") ? "png"
+                            : parser.isSet("dbv") ? "dbv"
                                                   : "";
     if (!recording.load_directory(positional.at(0), frames_csv, detection_csv, extension, error)) {
         QTextStream(stderr) << error << '\n';
@@ -195,6 +219,24 @@ inline int run_application(int argc, char** argv) {
     QTextStream(stdout) << recording.summary() << '\n';
     for (const auto& note : recording.notes())
         QTextStream(stderr) << note << '\n';
+    if (parser.isSet("export-png")) {
+        const QDir destination(parser.value("export-png"));
+        if (!QDir().mkpath(destination.absolutePath())) {
+            QTextStream(stderr) << "Cannot create export directory\n";
+            return 1;
+        }
+        std::size_t index = 0;
+        for (const auto& frame : recording.frames()) {
+            const auto path = destination.filePath(
+                QStringLiteral("%1.png").arg(++index, 8, 10, QChar('0')));
+            const auto image = read_frame_image(frame, error);
+            if (QFileInfo::exists(path) || image.isNull() || !image.save(path, "PNG")) {
+                QTextStream(stderr) << "Cannot export " << path << ": " << error << '\n';
+                return 1;
+            }
+        }
+        return 0;
+    }
     if (parser.isSet("check")) {
         for (const auto& frame : recording.frames()) {
             for (const auto& note : frame.notes)

@@ -98,7 +98,6 @@ private:
         result.max_outstanding_frames = kCapacity;
         result.exposure_mode = static_cast<std::uint32_t>(controls.exposure_mode);
         result.raw10_layout = static_cast<std::uint32_t>(controls.raw10_layout);
-        result.binary_threshold = controls.binary_threshold;
         /* start() applies exposure through the same path as later adjustments. */
         result.initial_exposure_lines = 0;
         return result;

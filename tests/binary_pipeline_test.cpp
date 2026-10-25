@@ -14,22 +14,51 @@
 
 #include "src/startup/services.cpp"
 #include "camera/c_api/raw10.h"
+#include "recorder/encoding/binary_decoder.cpp"
 
 namespace dart::tests {
 
 class BinaryPipelineTest final {
     static constexpr std::uint32_t kWidth = 320, kHeight = 240;
-    inline static std::uint32_t threshold_;
+    inline static bool low_contrast_;
     inline static camera::Raw10Layout layout_;
+    inline static unsigned pwm_starts_, pwm_stops_, pwm_writes_;
+    inline static pwm::Pulses last_pwm_;
+    inline static bool pwm_failure_;
+
+    class Pwm final : public pwm::IPwm {
+    public:
+        std::expected<void, pwm::Error> start(const pwm::Pulses& initial) noexcept override {
+            ++pwm_starts_;
+            assert((initial == pwm::Pulses{1510, 1520, 1530, 1540}));
+            last_pwm_ = initial;
+            return {};
+        }
+        std::expected<void, pwm::Error> write(const pwm::Pulses& pulses) noexcept override {
+            ++pwm_writes_;
+            if (pwm_failure_)
+                return std::unexpected(pwm::Error{"fake_write", 2, -7});
+            last_pwm_ = pulses;
+            return {};
+        }
+        std::expected<void, pwm::Error> stop() noexcept override {
+            ++pwm_stops_;
+            return {};
+        }
+    };
+
+    static std::expected<std::unique_ptr<pwm::IPwm>, pwm::Error> create_pwm() noexcept {
+        return std::unique_ptr<pwm::IPwm>{new Pwm};
+    }
 
     class Camera final : public camera::ICamera {
     public:
         explicit Camera(const camera::Controls& controls) {
-            assert(controls.binary_threshold == threshold_ && controls.raw10_layout == layout_);
+            assert(controls.raw10_layout == layout_);
             std::vector<std::uint8_t> raw(kWidth * kHeight * 2);
             for (std::uint32_t y = 0; y < kHeight; ++y) {
                 for (std::uint32_t x = 0; x < kWidth; ++x) {
-                    std::uint32_t sample = foreground(x, y) ? 200 : 199;
+                    std::uint32_t sample = raw_sample(x, y);
                     if (layout_ == camera::Raw10Layout::kLe16Msb)
                         sample <<= 6;
                     const auto offset = (y * kWidth + x) * 2;
@@ -38,9 +67,9 @@ class BinaryPipelineTest final {
                 }
             }
             assert(
-                dart_camera_raw10_binary(
+                dart_camera_raw10_gray(
                     raw.data(), raw.size(), kWidth, kHeight, kWidth * 2,
-                    static_cast<std::uint32_t>(layout_), threshold_, 0,
+                    static_cast<std::uint32_t>(layout_), 0,
                     reinterpret_cast<std::uint8_t*>(pixels_.data()), pixels_.size())
                 == 0);
             for (auto& slot : slots_) {
@@ -106,6 +135,9 @@ class BinaryPipelineTest final {
     static bool foreground(std::uint32_t x, std::uint32_t y) {
         return x >= 100 && x < 108 && y >= 100 && y < 108;
     }
+    static std::uint32_t raw_sample(std::uint32_t x, std::uint32_t y) {
+        return foreground(x, y) ? (low_contrast_ ? 200 : 800) : (low_contrast_ ? 199 : 160);
+    }
     static std::expected<std::unique_ptr<camera::ICamera>, camera::CameraError>
         create(const camera::Controls& controls) noexcept {
         return std::unique_ptr<camera::ICamera>{new Camera{controls}};
@@ -116,15 +148,59 @@ class BinaryPipelineTest final {
         return {std::istreambuf_iterator<char>{input}, {}};
     }
 
+    static void check_binary(const std::string& image) {
+        const auto data = std::span{
+            reinterpret_cast<const std::byte*>(image.data()), image.size()};
+        std::uint32_t width = 0, height = 0;
+        assert(data.size() >= recorder::BinaryFormat::kHeaderBytes);
+        assert(recorder::BinaryFormat::geometry(data.first(12), width, height));
+        assert(width == kWidth && height == kHeight);
+        recorder::BinaryDecoder decoder;
+        assert(decoder.prepare(width, height));
+        std::size_t offset = recorder::BinaryFormat::kHeaderBytes;
+        unsigned frames = 0;
+        while (offset < data.size()) {
+            std::uint32_t code = 0;
+            const auto prefix = recorder::BinaryFormat::parse(data.subspan(offset), code);
+            assert(prefix > 0);
+            offset += prefix;
+            assert((code >> 2U) <= data.size() - offset);
+            assert(decoder.decode(code, data.subspan(offset, code >> 2U)));
+            offset += code >> 2U;
+            const auto bits = decoder.bits();
+            for (std::size_t i = 0; i < kWidth * kHeight; ++i) {
+                const bool white = (std::to_integer<unsigned>(bits[i / 8]) & (128U >> (i % 8))) != 0;
+                assert(white == foreground(i % kWidth, i / kWidth));
+            }
+            ++frames;
+        }
+        assert(frames > 0 && offset == data.size());
+    }
+
 public:
-    static void run(bool pbm) {
+    static void run(bool pbm, bool pwm_failure = false, bool compact = false,
+                    bool low_contrast = false, std::uint32_t threshold = 50) {
+        low_contrast_ = low_contrast;
         char directory[] = "/tmp/dart-binary-pipeline-XXXXXX";
         assert(::mkdtemp(directory));
         const auto root = std::filesystem::path{directory};
         app::Arguments args{};
         args.seconds = 1;
-        args.record_format = pbm ? recorder::ImageFormat::kPbm : recorder::ImageFormat::kPgm;
-        args.threshold = threshold_ = pbm ? 0 : 50;
+        // Exercise camera -> RAW conversion -> detector -> mapping -> PWM task,
+        // with recording active and no IMU session.
+        pwm_starts_ = pwm_stops_ = pwm_writes_ = 0;
+        pwm_failure_ = pwm_failure;
+        for (std::size_t i = 0; i < args.servo.channels.size(); ++i) {
+            auto& channel = args.servo.channels[i];
+            channel.initial_pulse_us = 1510.0F + i * 10.0F;
+            channel.horizontal_us_per_pixel = i % 2 == 0 ? 1.0F : -1.0F;
+            channel.vertical_us_per_pixel = i < 2 ? 2.0F : -2.0F;
+        }
+        if (compact)
+            args.record_format = recorder::ImageFormat::kDbv;
+        else
+            args.record_format = pbm ? recorder::ImageFormat::kPbm : recorder::ImageFormat::kPgm;
+        args.threshold = pbm ? 0 : threshold;
         args.raw10_layout = layout_ =
             pbm ? camera::Raw10Layout::kLe16Lsb : camera::Raw10Layout::kLe16Msb;
         assert(app::copy_path(args.log_path, sizeof(args.log_path), (root / "app.log").string()));
@@ -132,12 +208,32 @@ public:
         platform::RunControl control{args.seconds};
         logging::Logger log_sink;
         assert(log_sink.open(args.log_path));
-        assert(app::run_services(args, create, control, log_sink) == 0);
+        assert(app::run_services(args, create, control, log_sink, nullptr, nullptr, create_pwm) == 0);
+        assert(pwm_starts_ == 1 && pwm_stops_ == 1);
+        if (pbm || pwm_failure || low_contrast || threshold > 200) // No accepted target, or PWM has failed.
+            assert((last_pwm_ == pwm::Pulses{1510, 1520, 1530, 1540}));
+        else {
+            assert(pwm_writes_ >= 1);
+            // Tracker retains the sampled acquisition centroid (103,103)
+            // inside its deadband. Automatic aim is (160,120).
+            const pwm::Pulses expected{1487, 1611, 1439, 1563};
+            for (std::size_t i = 0; i < expected.size(); ++i)
+                assert(std::abs(last_pwm_[i] - expected[i]) < 0.01F);
+        }
         const auto log = read(root / "app.log");
         assert(log.find("op=detector_prepare result=ok") != std::string::npos);
-        assert(log.find("level=ERROR") == std::string::npos);
+        if (pwm_failure)
+            assert(log.find("module=servo op=stop operation=fake_write") != std::string::npos);
+        else
+            assert(log.find("level=ERROR") == std::string::npos);
         const auto image =
-            read(root / "records/rec_0001/img" / (pbm ? "recording.pbm" : "recording.pgm"));
+            read(root / "records/rec_0001/img" / (compact ? "recording.dbv"
+                                                       : pbm ? "recording.pbm" : "recording.pgm"));
+        if (compact) {
+            check_binary(image);
+            std::filesystem::remove_all(root);
+            return;
+        }
         const std::string header = pbm ? "P4\n320 240\n" : "P5\n320 240\n255\n";
         const std::size_t payload = pbm ? kWidth * kHeight / 8 : kWidth * kHeight;
         const auto record = header.size() + payload;
@@ -145,7 +241,7 @@ public:
         for (std::size_t offset = 0; offset < image.size(); offset += record) {
             assert(image.substr(offset, header.size()) == header);
             for (std::size_t i = 0; i < payload; ++i) {
-                const auto expected = pbm ? 0 : foreground(i % kWidth, i / kWidth) ? 255 : 0;
+                const auto expected = pbm ? 0 : raw_sample(i % kWidth, i / kWidth) >> 2;
                 assert(static_cast<unsigned char>(image[offset + header.size() + i]) == expected);
             }
         }
@@ -158,4 +254,8 @@ public:
 int main() {
     dart::tests::BinaryPipelineTest::run(true);
     dart::tests::BinaryPipelineTest::run(false);
+    dart::tests::BinaryPipelineTest::run(false, true);
+    dart::tests::BinaryPipelineTest::run(false, false, true);
+    dart::tests::BinaryPipelineTest::run(false, false, false, true);
+    dart::tests::BinaryPipelineTest::run(false, false, false, false, 201);
 }

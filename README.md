@@ -36,22 +36,24 @@
 | `runtime/launcher/` | 开机自启动器（纯 POSIX C11，平台无关）+ `startup.list` 母版 | `launcher` → `build-cross/launcher/launcher` |
 | `src/dart_entry.cpp`、`src/{startup,vision,recording,diagnostics}/` | L4 入口、配置、流程与故障决策 | `dart_app` → `build-cross/dart_app/dart_app` |
 | `src/detector/` | L4 灯/装甲板检测与 ROI，只消费帧数据 | `dart_detection`（INTERFACE，包含类 `.cpp`） |
-| `include/firmware/src/recorder/` | 录像队列、线程、逐帧 PNG 与旧 PGM/PBM 流 | `dart_recording`（INTERFACE，包含类 `.cpp`） |
+| [`src/control/`](src/control/README.md) | L4 四路舵机初始位置、左右/上下坐标映射与脉宽合成 | `dart_control`（INTERFACE，包含类 `.cpp`） |
+| `include/firmware/src/recorder/` | 录像队列、线程、紧凑 DBV 与兼容 PNG/PGM/PBM | `dart_recording`（INTERFACE，包含类 `.cpp`） |
 | `runtime/imu/` | 独立 IMU 采样、上层共用的积分状态和异步原始/积分日志 | `dart_imu_logging`（INTERFACE，包含类 `.cpp`） |
 | `include/firmware/src/camera/` | L3 帧数据/相机抽象 + L2/C 数据面实现 | `dart_camera_types` / `dart_camera_core` / `dart_camera_k230` / `dart_camera_acl` |
 | `include/firmware/src/{imu,spi}/` | IMU 抽象/估计器 + SPI 驱动 + K230 适配器 | `dart_imu` / `dart_iim42652` / `dart_imu_k230` |
+| [`include/firmware/src/pwm/`](include/firmware/src/pwm/README.md) | 四路 PWM 接口、独立输出任务与 K230 引脚适配 | `dart_pwm` |
 | `include/firmware/src/{board,system,logging,storage}/` | 板级组装、进程资源、日志与目录操作 | `dart_board` / `dart_platform` |
 | `.script/` | 构建、部署、板端清理和相机回归检查；`install-rtos` 可注册短命令 | — |
 | [`tools/`](tools/README.md) | 主机播放器、IMU 日志工具与独立 RAW 相机诊断探针 | 独立构建的工具 |
 
 `dart_entry.cpp` 将板级工厂注入 `startup/run.cpp`，启动流程调用视觉、录像与诊断模块；
 设备初始化和系统资源操作由 `include/` 的实现承担。可选 IMU 采样已独立运行，
-后续控制任务也由应用统一组装，按各自频率运行。`launcher` 负责进程启动与监督。应用说明见
+纯视觉控制通过独立 PWM 任务消费每帧的两轴映射结果，不依赖 IMU。`launcher` 负责进程启动与监督。应用说明见
 [`src/startup/README.md`](src/startup/README.md)。
 
-当前启动清单临时启用四路舵机 PWM 测试，每次开机运行约 43 秒后关闭输出，
-视觉/录像/IMU 应用行保留为注释。需显式构建并部署 `pwm_swing` 后再部署清单，
-接线、命令与恢复业务步骤见 [`PWM 测试说明`](tools/pwm_swing/README.md)。
+当前启动清单启用 `dart_app` 纯视觉 PWM 与录像，预设点为图像中心，默认零增益使四路保持初始脉宽。
+标定参数与故障处理见 [舵机控制说明](src/control/README.md)。独立的
+[`PWM 测试`](tools/pwm_swing/README.md) 保留为手动工具，与 `dart_app` 的 PWM 输出互斥。
 
 硬件资源是独占的：**同一时刻只能有一个进程持有 VICAP/VB**，所以"识别"和"录像"
 合在 `dart_app` 一个 ELF 里，清单里也只能出现一条。详见
@@ -134,9 +136,12 @@ HAL 头文件和库只取 SDK `.config` 的 `CONFIG_BOARD_CONFIG_NAME` 对应输
 `cmake --preset cross -DK230_SDK_OUTPUT_DIR=/path/to/sdk/output/<board_defconfig>`。
 
 新版 Dart V1 固件的 SC038HGS 使用 CSI2、640 × 480 RAW10。应用通过 MCM 直采并
-直接按 `raw10 >= --threshold × 4` 输出 0/255 二值 Y8，识别与录像共用同一图像，
-不依赖 ISP 标定文件。录像默认保存独立的 1-bit PNG 无损图片，每轮图片实际总量最多 500 MB；
-每 32 张分组，达到容量上限后停止录像，识别继续运行。
+按 `raw10 >> 2` 输出保留 256 级亮度的灰度 Y8，识别与录像共用同一图像，
+不依赖 ISP 标定文件。识别以 `--threshold`（默认 50）提取候选，再用候选与周围背景的
+灰度均值差（`--min-contrast`，默认 12）过滤低对比度干扰；阈值不改变相机图像。
+录像默认保存单文件灰度 PGM，也可选择灰度 PNG；DBV/PBM 是可选的二值导出格式。
+每轮最多 500 MB；
+多帧合并到一个文件，达到容量上限后停止录像，识别继续运行。
 `/data` 分区另设 2 GB（2,000,000,000 字节）总占用保护，计入旧录像、日志和分配开销，
 并预留 64 MiB；空间不足时停止录像并保留已有文件。
 本机 MCM RAW10 的 DDR 排列已通过 640×480 渐变图逐像素验证：
@@ -145,7 +150,7 @@ HAL 头文件和库只取 SDK `.config` 的 `CONFIG_BOARD_CONFIG_NAME` 对应输
 应用默认通过曝光接口设置 400 行曝光（`--exp 400`）；K230 后端同步设置
 帧长 VTS=600，通过现有传感器寄存器接口完成，无需修改固件或标定像素时钟。
 `--exp 0` 保留传感器初始化曝光；RAW 路径不支持 `--ae`。
-开机清单使用 `--exp 300`，对应帧长 VTS=600。此前连续 PBM 版本实测录像
+开机清单使用 `--exp 400`，对应帧长 VTS=600。此前连续 PBM 版本实测录像
 55.881 FPS，在 499,995,987 字节正常停录；目标场景曝光/阈值尚未标定，详见 [实板记录](src/startup/README.md#验证状态)。
 适配细节及板端验证步骤见 [相机说明](include/firmware/src/camera/README.md#sc038hgs--dart-v1)。
 

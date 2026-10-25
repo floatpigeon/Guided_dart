@@ -72,7 +72,8 @@ private:
     static bool recorder_file_name(const char* name, bool image) noexcept {
         if (!image)
             return std::strcmp(name, "frames.csv") == 0;
-        if (std::strcmp(name, "recording.pgm") == 0 || std::strcmp(name, "recording.pbm") == 0)
+        if (std::strcmp(name, "recording.pgm") == 0 || std::strcmp(name, "recording.pbm") == 0
+            || std::strcmp(name, "recording.dbv") == 0)
             return true;
         if (std::strlen(name) == 12 && std::strcmp(name + 8, ".png") == 0) {
             for (unsigned i = 0; i < 8; ++i)
@@ -336,6 +337,7 @@ inline bool Session::open() noexcept {
     const int stream_n = std::snprintf(
         image_path_, sizeof(image_path_), "%s/%s", image_dir_,
         config_.image_format == ImageFormat::kPng   ? "."
+        : config_.image_format == ImageFormat::kDbv ? "recording.dbv"
         : config_.image_format == ImageFormat::kPbm ? "recording.pbm"
                                                     : "recording.pgm");
     if (image_n <= 0 || log_n <= 0 || event_n <= 0 || stream_n <= 0

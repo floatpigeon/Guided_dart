@@ -16,7 +16,8 @@ namespace dart::app {
 
 template <typename ImuRunner>
 inline int run_capture(
-    const Arguments& args, platform::CameraFactory camera_factory, ImuRunner&& run_imu) noexcept {
+    const Arguments& args, platform::CameraFactory camera_factory, ImuRunner&& run_imu,
+    platform::PwmFactory pwm_factory = nullptr) noexcept {
     platform::RunControl control{args.seconds};
     platform::WriteControl writes;
     if (!writes.start())
@@ -31,17 +32,19 @@ inline int run_capture(
         args.imu_on, args.imu_bus, args.imu_cs, args.imu_log, args.imu_ignore_id, &writes,
         args.record_auto ? &RecordingTrigger::observe : nullptr, &trigger};
     return run_imu(options, log, [&](imu::Session* session) noexcept {
-        return run_services(args, camera_factory, control, log, session, &writes);
+        return run_services(args, camera_factory, control, log, session, &writes, pwm_factory);
     });
 }
 
 template <typename ImuRunner>
 inline int run_application(
-    int argc, char* argv[], platform::CameraFactory camera_factory, ImuRunner&& run_imu) noexcept {
+    int argc, char* argv[], platform::CameraFactory camera_factory, ImuRunner&& run_imu,
+    platform::PwmFactory pwm_factory = nullptr) noexcept {
     auto args = parse_args(argc, argv);
     if (!args)
         return args.error();
-    const int result = run_capture(args.value(), camera_factory, std::forward<ImuRunner>(run_imu));
+    const int result = run_capture(args.value(), camera_factory, std::forward<ImuRunner>(run_imu),
+                                   pwm_factory);
     platform::notify_launcher_exit();
     return result;
 }

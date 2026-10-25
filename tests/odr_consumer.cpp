@@ -3,7 +3,9 @@
 
 #include "camera/frame_lease.cpp"
 #include "imu/estimator.cpp"
+#include "pwm/session.cpp"
 #include "recorder/recorder.cpp"
+#include "src/control/servo_mapping.cpp"
 #include "src/detector/roi.cpp"
 
 namespace dart::tests {
@@ -19,8 +21,10 @@ inline bool OdrConsumer::check() noexcept {
     imu::Estimator estimator;
     detection::RoiDetector detector;
     recorder::Recorder recording{recorder::Config{}};
+    control::ServoMapping mapping;
     return !estimator.current().has_reference_frame && detector.Prepare(64, 64)
-        && !recording.started();
+        && !recording.started() && mapping.pulses().has_value()
+        && pwm::valid_pulses(mapping.pulses()->pulse_us);
 }
 
 } // namespace dart::tests

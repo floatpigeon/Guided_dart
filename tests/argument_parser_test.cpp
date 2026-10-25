@@ -1,6 +1,9 @@
 
 
 #include <cassert>
+#include <initializer_list>
+#include <string>
+#include <vector>
 
 #include "src/startup/argument_parser.cpp"
 #include "src/recording/frame_recording.cpp"
@@ -8,6 +11,15 @@
 namespace dart::tests {
 
 class ArgumentParserTest final {
+    static std::expected<app::Arguments, int> parse(std::initializer_list<const char*> values) {
+        std::vector<std::string> strings{"dart_app"};
+        for (const auto* value : values)
+            strings.emplace_back(value);
+        std::vector<char*> arguments;
+        for (auto& value : strings)
+            arguments.push_back(value.data());
+        return app::parse_args(static_cast<int>(arguments.size()), arguments.data());
+    }
 public:
     static void run() {
         char program[] = "dart_app";
@@ -15,7 +27,37 @@ public:
         auto parsed = app::parse_args(1, defaults);
         assert(parsed && parsed->record_on && parsed->exposure_lines == 400);
         assert(parsed->record_fps == 60 && parsed->record_keep == 0);
-        assert(parsed->record_format == recorder::ImageFormat::kPng && parsed->threshold == 50);
+        assert(parsed->record_format == recorder::ImageFormat::kPgm && parsed->threshold == 50);
+        assert(parsed->min_contrast == 12);
+        assert(parse({"--min-contrast", "0"})->min_contrast == 0);
+        assert(parse({"--min-contrast", "255"})->min_contrast == 255);
+        assert(parse({"--min-contrast", "12.5"})->min_contrast == 12.5F);
+        assert(!parse({"--min-contrast", "256"}));
+        assert(!parse({"--min-contrast", "-1"}));
+        assert(!parse({"--min-contrast", "nan"}));
+        assert(!parse({"--min-contrast", "inf"}));
+        assert(!parse({"--min-contrast"}));
+        assert(app::recording_config(*parse({"--threshold", "60"}), 640, 480).pbm_threshold == 60);
+        assert(parsed->pwm_on && !parsed->aim_explicit && parsed->servo_timeout_ms == 200);
+        const auto servo = parse({"--pwm", "on", "--aim", "310.5,235", "--servo-initial",
+            "1510,1520,1530,1540", "--servo-horizontal", "1,-2,0,0.25", "--servo-vertical",
+            "-1,0,2,-0.5", "--servo-timeout-ms", "300"});
+        assert(servo && servo->aim_explicit && servo->aim.x == 310.5F && servo->aim.y == 235);
+        assert(servo->servo.channels[3].initial_pulse_us == 1540);
+        assert(servo->servo.channels[1].horizontal_us_per_pixel == -2);
+        assert(servo->servo.channels[3].vertical_us_per_pixel == -0.5F);
+        assert(servo->servo_timeout_ms == 300);
+        assert(!parse({"--pwm", "off"})->pwm_on);
+        for (const auto* bad : {"1,2,3", "1,2,3,4,5", "1,2,3,", "1,,2,3", "nan,0,0,0",
+                                "0,inf,0,0", "0,0,0,1e50", "0,0,0,2x"})
+            assert(!parse({"--servo-horizontal", bad}));
+        assert(!parse({"--servo-horizontal"}));
+        assert(!parse({"--aim", "-1,20"}));
+        assert(!parse({"--aim", "1,2,3"}));
+        assert(!parse({"--servo-timeout-ms", "0"}));
+        assert(!parse({"--servo-initial", "1300,1520,1520,1520"}));
+        assert(!parse({"--servo-min", "0,1420,1420,1420"}));
+        assert(!parse({"--servo-max", "3100,1620,1620,1620"}));
         assert(app::recording_config(*parsed, 640, 480).max_storage_bytes == 2'000'000'000);
         for (const auto directory : {"/data", "/data/", "/data/custom", "/database", "/tmp/records"}) {
             app::Arguments args;
@@ -26,11 +68,12 @@ public:
                    == (data_volume ? 2'000'000'000 : 0));
         }
         char format[] = "--rec-format";
-        char png[] = "png", pgm[] = "pgm", pbm[] = "pbm", bad_format[] = "jpg";
-        for (char* value : {png, pgm, pbm}) {
+        char dbv[] = "dbv", png[] = "png", pgm[] = "pgm", pbm[] = "pbm", bad_format[] = "jpg";
+        for (char* value : {dbv, png, pgm, pbm}) {
             char* options[] = {program, format, value};
             const auto chosen = app::parse_args(3, options);
-            assert(chosen && chosen->record_format == (value == png ? recorder::ImageFormat::kPng
+            assert(chosen && chosen->record_format == (value == dbv ? recorder::ImageFormat::kDbv
+                : value == png ? recorder::ImageFormat::kPng
                 : value == pgm ? recorder::ImageFormat::kPgm : recorder::ImageFormat::kPbm));
         }
         char* bad_options[] = {program, format, bad_format};

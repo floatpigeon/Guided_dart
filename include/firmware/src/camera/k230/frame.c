@@ -215,15 +215,15 @@ int dart_camera_acquire_frame(
     if (cache_rc != 0) {
         return abandon_frame(camera, slot, DART_CAMERA_E_CACHE_INVALIDATE_FAILED, frame);
     }
-    const size_t binary_bytes = (size_t)source->width * source->height;
-    uint8_t* binary = camera->binary_frames + slot * binary_bytes;
-    result = dart_camera_raw10_binary(
+    const size_t gray_bytes = (size_t)source->width * source->height;
+    uint8_t* gray = camera->gray_frames + slot * gray_bytes;
+    result = dart_camera_raw10_gray(
         mapped, (size_t)length, source->width, source->height, camera->raw_stride,
-        camera->config.raw10_layout, camera->config.binary_threshold, camera->config.mirror, binary,
-        binary_bytes);
+        camera->config.raw10_layout, camera->config.mirror, gray,
+        gray_bytes);
     if (result != DART_CAMERA_OK)
         return abandon_frame(camera, slot, result, frame);
-    /* Consumers retain CPU binary pixels, so RAW DMA buffers can circulate
+    /* Consumers retain CPU gray pixels, so RAW DMA buffers can circulate
      * while the recorder writes. Never publish a lease after release failure. */
     result = dart_camera_release_dump(camera, slot);
     if (result != DART_CAMERA_OK)
@@ -236,7 +236,7 @@ int dart_camera_acquire_frame(
     /* owner and token were stamped into the frame when the slot was reserved. */
     frame->abi_version = DART_CAMERA_ABI_VERSION;
     frame->struct_size = sizeof(*frame);
-    frame->data = binary;
+    frame->data = gray;
     frame->width = source->width;
     frame->height = source->height;
     frame->stride = source->width;

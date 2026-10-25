@@ -1,8 +1,13 @@
 # 主机工具与板端诊断探针
 
-本目录的 Qt 播放器、Python 和 ROS 2 launch XML 只在主机运行，不参与板端应用 CMake、
-交叉编译或部署。Python 使用标准库组织解析、时间轴和几何计算；ROS 2 导入集中在
+本目录的 Qt 播放器、主机 Python 和 ROS 2 launch XML 不参与板端应用 CMake、
+交叉编译或部署。主机 Python 使用标准库组织解析、时间轴和几何计算；ROS 2 导入集中在
 bag 写入边界，无需创建 ROS package 或运行 colcon。
+
+[`canmv_tune.py`](canmv_tune.py) 在 Dart V1 的 CanMV MicroPython 上运行，
+用于调整与 RT-Smart C/C++ 同量纲的曝光行数、灰度候选阈值、背景对比度和四路舵机零点。
+调参项集中在文件顶部；相机需配套 RAW 接口，解释器构建及运行方法见
+[`canmv_tuning/README.md`](canmv_tuning/README.md)。关闭相机后可直接在当前固件标定 PWM。
 
 [`sc038hgs_raw/`](sc038hgs_raw/README.md) 是单独交叉构建的板端相机诊断探针，
 包含 RAW 转换器和历史 ISP 对照资源。它不参与正式应用的构建或部署，

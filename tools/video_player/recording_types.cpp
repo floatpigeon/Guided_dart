@@ -33,7 +33,10 @@ struct Frame {
     QString path;
     QString relative_name;
     qint64 file_offset = 0;
-    qint64 file_bytes = 0; // Nonzero for one complete image within a PGM/PBM stream.
+    qint64 file_bytes = 0; // Nonzero for one complete record within an image stream.
+    qint64 binary_key_offset = -1;
+    qint64 binary_decode_offset = -1; // Repeat frames reuse the last changed frame.
+    quint32 binary_width = 0, binary_height = 0;
     std::optional<CsvRow> event;
     std::optional<CsvRow> detection;
     QStringList notes;

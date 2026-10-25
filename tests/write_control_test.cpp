@@ -165,7 +165,7 @@ class WriteControlTest final {
     }
 public:
     static void run() {
-        for (const auto format : {recorder::ImageFormat::kPng, recorder::ImageFormat::kPgm,
+        for (const auto format : {recorder::ImageFormat::kDbv, recorder::ImageFormat::kPng, recorder::ImageFormat::kPgm,
                                   recorder::ImageFormat::kPbm}) {
             char path[] = "/tmp/dart-write-control-XXXXXX";
             assert(::mkdtemp(path));

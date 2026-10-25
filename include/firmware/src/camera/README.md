@@ -7,7 +7,7 @@ C++ 按职责包含带保护的 `.cpp`，通过 `dart_camera_acl` INTERFACE 目�
 | 文件 | 类 / 职责 |
 |---|---|
 | `frame_view.cpp` | `FrameView`，L3 只读帧数据 |
-| `interface.cpp` | `ICamera`、曝光/RAW10 布局/二值阈值、实际尺寸与取帧契约 |
+| `interface.cpp` | `ICamera`、曝光/RAW10 布局、实际尺寸与取帧契约 |
 | `frame_lease.cpp` | `FrameLease` 的移动与释放语义，以及后端槽位与受限构造入口 |
 | `error.cpp` | 错误分类、上下文、原生码翻译及有界诊断文本 |
 | `k230/camera.cpp` | `Camera<N>`，K230 生命周期、曝光调整与 C ABI 适配 |
@@ -35,7 +35,7 @@ if (!created) {
 L4 只依赖 `camera/frame_view.cpp` 与 `dart_camera_types`，应用组合根选择具体相机。
 业务采集流程注入 `ICamera`，不请求采集模式、分辨率、帧率、CSI 或缓冲池配置。
 `frame_info()` 只读回实际输出尺寸，供消费者预分配；逐帧尺寸和 stride 来自 `FrameView`。
-`Controls` 提供曝光、RAW10 DDR 布局与二值阈值；K230 工厂从固件可用模式中选择，CSI 来自
+`Controls` 提供曝光与 RAW10 DDR 布局；K230 工厂从固件可用模式中选择，CSI 来自
 `CONFIG_MPP_SENSOR_DEFAULT_CSI`。硬件探测失败返回错误，应用停用采集并保留独立服务。
 代码通过主机回归和交叉链接验证；下面的硬件说明仍需真实板端验证。
 
@@ -43,7 +43,7 @@ L4 只依赖 `camera/frame_view.cpp` 与 `dart_camera_types`，应用组合根�
 
 Dart V1 固件使用 CSI2 上的黑白 SC038HGS（640 × 480、RAW10 输入）。
 后端使用 `VICAP_WORK_ONLY_MCM_MODE`，数据流为
-`SC038HGS RAW10 → CSI/MCM → DDR → CPU 阈值二值化 → 识别/录像`。
+`SC038HGS RAW10 → CSI/MCM → DDR → CPU 解包为灰度 Y8（RAW10 >> 2） → 识别/录像`。
 不启动 ISP 图像处理，不加载 XML/JSON，不缩放；不支持的传感器、非原生输出尺寸
 与自动曝光请求会明确报错。MCM 本身属于 ISP 子系统，但不经过 ISP 图像处理流水线。
 
@@ -67,11 +67,13 @@ MCM 固定四槽环形数组，配置缓冲数固定为 4，不随 CPU 租约容
 2026-10-20 实板渐变图全部 307,200 像素符合连续规律，8 帧短时到达约 96 FPS。
 当前 K230 后端只接受这个已验证布局；通用解包工具仍保留三种候选格式供其它数据分析。
 
-`c_api/raw10.c` 直接执行 `raw10 >= binary_threshold*4`，输出只有 0/255 的紧凑 Y8。
-阈值范围 0..255，默认 50；每个公开租约拥有独立的预分配 CPU 二值缓冲。
-RAW dump 在转换完成后立即归还，录像持有二值缓冲不会占用 DMA 环。
-识别器和录像使用同一帧；二者固定用 128 区分黑白。默认 PBM 按 1 bit/像素存储，
-PGM 选项也只写二值像素。软件镜像在二值化时完成。
+`c_api/raw10.c` 通过 `dart_camera_raw10_gray()` 执行 `raw10 >> 2`，输出线性灰度 Y8。
+不做黑电平校正、gamma 或阈值二值化；每个公开租约拥有独立的预分配 CPU 灰度缓冲。
+RAW dump 在转换完成后立即归还，录像持有灰度缓冲不会占用 DMA 环。
+识别器和录像使用同一帧。`--threshold` 仅控制候选提取，`--min-contrast` 控制候选与
+背景的最小亮度差；两者均不修改相机像素。默认 PGM 和可选 PNG 保留灰度，
+显式选择 DBV/PBM 时才在录像器内按 `--threshold` 导出二值图。软件镜像在解包时完成。
+C ABI 已升至 6，移除了相机二值阈值配置；相机消费者与 CanMV 解释器需一起重新编译。
 
 应用默认通过曝光接口设置 **400 行**（`--exp 400`），K230 后端使用现有
 `kd_mpi_sensor_reg_read/write`，将曝光编码 6400（`0x01900`）和帧长 `VTS=600`
@@ -79,9 +81,9 @@ PGM 选项也只写二值像素。软件镜像在二值化时完成。
 无需修改 SDK 驱动默认值或重新烧录固件，也不依赖内部 Pixel CLK 的微秒换算。
 像素时钟和 HTS 不变时，400 行曝光时间是原 128 行的 3.125 倍，帧长保持
 `VTS=600`。`--rec-fps` 仅控制录像按接收时间抽帧。
-开机清单使用 300 行曝光、VTS=600，为约 60 FPS 录像留出采集余量。
+开机清单使用 400 行曝光、VTS=600，为约 60 FPS 录像留出采集余量。
 
-板端先验证 RAW10 排列、首帧、二值图和稳定录像，再标定像素时钟、黑电平、
+板端先验证 RAW10 排列、首帧、灰度图和稳定录像，再标定像素时钟、黑电平、
 亮度响应与缓存一致性；主机模拟和交叉编译不能验证这些硬件行为。
 
 ## Exposure
@@ -116,7 +118,7 @@ documented pool/block handle encoding is used only for these startup queries;
 no blocks are taken from VICAP or released through the VB API. Camera teardown
 unmaps all blocks, deinitializes VICAP, then destroys its pool.
 Acquisition invalidates the RAW DMA cache, converts into a per-slot CPU buffer,
-and releases the RAW dump before returning a binary Y8 lease (`stride == width`).
+and releases the RAW dump before returning a grayscale Y8 lease (`stride == width`).
 No allocation, mapping or unmapping occurs in acquire/release.
 The caller injects a lease capacity: up to `max_outstanding_frames` frames may be
 outstanding at once, each carrying a distinct token, and release order is free. A
@@ -128,7 +130,7 @@ are aliases, not additional references.
 
 Capacity is bounded twice: by the ceiling in `error_codes.h`
 (`DART_CAMERA_MAX_OUTSTANDING_FRAMES`) and by `channel_buffers`, which bounds CPU
-binary lease slots. Requesting more is a configuration error. RAW DMA has a
+grayscale lease slots. Requesting more is a configuration error. RAW DMA has a
 separate fixed four-buffer ring.
 When every slot is already held, acquire does not touch the driver at all: it
 reports `DART_CAMERA_E_LEASE_EXHAUSTED`, the frame stays in the driver pool and is

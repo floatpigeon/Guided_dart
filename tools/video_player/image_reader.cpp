@@ -7,11 +7,16 @@
 #include <QString>
 
 #include "recording_types.cpp"
+#include "binary_stream.cpp"
 
 namespace dart::tools::video_player {
 
 inline QImage read_frame_image(const Frame& frame, QString& error) {
     error.clear();
+    if (frame.binary_key_offset >= 0) {
+        static thread_local BinaryImageReader binary;
+        return binary.read(frame, error);
+    }
     if (frame.file_bytes == 0) {
         QImageReader reader(frame.path);
         const auto image = reader.read();

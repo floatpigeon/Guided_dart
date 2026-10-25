@@ -8,16 +8,18 @@ endif()
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+find_package(ZLIB REQUIRED)
 
 add_library(dart_video_player INTERFACE)
 target_compile_features(dart_video_player INTERFACE cxx_std_23)
 target_compile_options(dart_video_player INTERFACE -Wall -Wextra -Wpedantic)
-target_link_libraries(dart_video_player INTERFACE Qt${QT_VERSION_MAJOR}::Widgets)
+target_link_libraries(dart_video_player INTERFACE Qt${QT_VERSION_MAJOR}::Widgets ZLIB::ZLIB)
+target_include_directories(dart_video_player INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/../../include/firmware/src")
 
 add_executable(video_player main.cpp)
 target_link_libraries(video_player PRIVATE dart_video_player)
 
-foreach(component recording_types recording_paths csv image_reader recording image_view player)
+foreach(component recording_types recording_paths csv binary_stream image_reader recording image_view player)
     add_library(video_player_${component}_check OBJECT ${component}.cpp)
     target_link_libraries(video_player_${component}_check PRIVATE dart_video_player)
 endforeach()

@@ -124,8 +124,8 @@ static int cleanup_init_resources(dart_camera_t* camera) {
         }
         camera->raw_pool_id = -1;
     }
-    free(camera->binary_frames);
-    camera->binary_frames = NULL;
+    free(camera->gray_frames);
+    camera->gray_frames = NULL;
 
     /* Keep the media attachment while any resource remains live. This prevents
      * another camera from taking ownership after a partial rollback.
@@ -265,9 +265,9 @@ int dart_camera_init(
     /* Hardware-verified MCM RAW10 is tightly packed: 4 samples / 5 bytes.
      * The conservative SDK DMA span is separate; see k230/mcm.c. */
     camera->raw_stride = sensor.width / 4u * 5u;
-    camera->binary_frames =
+    camera->gray_frames =
         malloc((size_t)sensor.width * sensor.height * config->max_outstanding_frames);
-    if (camera->binary_frames == NULL) {
+    if (camera->gray_frames == NULL) {
         (void)cleanup_init_resources(camera);
         return DART_CAMERA_E_NO_MEMORY;
     }
@@ -293,7 +293,7 @@ int dart_camera_init(
     dev.buffer_pool_id = camera->raw_pool_id;
     dev.pipe_ctrl.data = 0;
     dev.sensor_info = sensor;
-    /* Mirror is applied to the binary CPU buffer, without ISP geometry. */
+    /* Mirror is applied to the gray CPU buffer, without ISP geometry. */
     rc = kd_mpi_vicap_set_dev_attr(VICAP_DEV_ID_0, dev);
     if (rc != 0) {
         const int primary = rc;
@@ -490,7 +490,7 @@ int dart_camera_destroy(dart_camera_t* camera) {
     }
     if (camera->state != DART_CAMERA_STATE_EMPTY || camera->media != NULL
         || camera->vicap_initialized || camera->stream_started || camera->sensor_powered
-        || camera->raw_pool_id >= 0 || camera->binary_frames != NULL
+        || camera->raw_pool_id >= 0 || camera->gray_frames != NULL
         || dart_camera_held_frames(camera) > 0u || dart_frame_lease_active(&camera->leases) > 0u) {
         return DART_CAMERA_E_BUSY;
     }

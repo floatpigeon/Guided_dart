@@ -4,6 +4,7 @@ build-cross/
 /build-board-validation-host/
 /build-board-validation-player/
 
+内录/
 # Python 工具的本地缓存
 __pycache__/
 *.py[cod]

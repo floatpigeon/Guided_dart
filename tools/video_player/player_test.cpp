@@ -9,9 +9,14 @@
 #include <QSlider>
 #include <QTemporaryDir>
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <stdexcept>
+#include <vector>
 
+#include "recorder/encoding/binary_encoder.cpp"
 #include "player.cpp"
 
 namespace dart::tools::video_player::tests {
@@ -35,10 +40,12 @@ public:
         test.empty_csv();
         test.gui();
         streams();
+        binary_streams();
+        encoded_binary_streams();
         png_frames();
         flattened_recording();
         session_collection();
-        std::puts("video player: association, CSV, PGM/PBM, overlays, GUI and CLI passed");
+        std::puts("video player: association, CSV, DBV/PNG/PGM/PBM, export, overlays, GUI and CLI passed");
     }
 
 private:
@@ -354,6 +361,206 @@ private:
         cli({"--check", root + "/rec_0001"}, 0);
         cli({"--check", root + "/rec_0001/img"}, 0);
     }
+    static void encoded_binary_streams() {
+        QTemporaryDir directory;
+        require(directory.isValid(), "current encoder directory");
+        const auto root = directory.path();
+        require(QDir(root).mkpath("img") && QDir(root).mkpath("logs"), "encoder subdirectories");
+        constexpr unsigned width = 81, height = 33, count = 12;
+        constexpr std::uint8_t threshold = 50;
+        recorder::BinaryEncoder encoder;
+        require(encoder.prepare(width, height, threshold), "prepare current board encoder");
+        QByteArray data(recorder::BinaryFormat::kHeaderBytes, '\0');
+        recorder::BinaryFormat::header(reinterpret_cast<std::byte*>(data.data()), width, height);
+        std::vector<std::byte> pixels(width * height);
+        std::vector<QImage> images;
+        std::vector<qint64> offsets, sizes;
+        QString csv = "input_index,source_sequence,source_pts,source_pts_timebase_validated,"
+                      "received_us,decision,image_index,image_file,file_offset,file_bytes\n";
+        QString detections = detection_header();
+        std::uint32_t random = 17;
+        for (unsigned i = 0; i < count; ++i) {
+            // Odd frames repeat the input exactly, while even frames exercise
+            // dense noise, sparse changes, a new full frame and threshold edges.
+            if (i == 0 || i == 8) {
+                for (auto& pixel : pixels) {
+                    random = random * 1664525U + 1013904223U;
+                    pixel = std::byte((random >> 24U) & 255U);
+                }
+            } else if (i == 4) {
+                std::fill(pixels.begin(), pixels.end(), std::byte{0});
+            } else if ((i & 1U) == 0) {
+                pixels[i * 29] = std::byte{threshold};
+                pixels[i * 29 + 1] = std::byte{threshold - 1};
+            }
+            QImage image(width, height, QImage::Format_Grayscale8);
+            for (unsigned y = 0; y < height; ++y)
+                for (unsigned x = 0; x < width; ++x)
+                    image.scanLine(y)[x] = std::to_integer<unsigned>(pixels[y * width + x])
+                            >= threshold ? 255 : 0;
+            images.push_back(image);
+            const auto record = encoder.encode(pixels);
+            quint32 code = 0;
+            require(!record.empty() && recorder::BinaryFormat::parse(record, code) > 0
+                        && (code >> 2U) > 0,
+                    "current encoder keeps identical inputs without legacy repeat records");
+            const qint64 offset = i == 0 ? 0 : data.size();
+            data.append(reinterpret_cast<const char*>(record.data()), static_cast<int>(record.size()));
+            offsets.push_back(offset);
+            sizes.push_back(data.size() - offset);
+            const auto sequence = QString::number(100 + i * 2);
+            const auto received = QString::number(100000 + i * 16667);
+            const auto pts = QString::number(1000 + i);
+            csv += QStringLiteral("%1,%2,%3,0,%4,accepted,%1,img/recording.dbv,%5,%6\n")
+                       .arg(i + 1).arg(sequence, pts, received).arg(offset).arg(sizes.back());
+            detections += detection_row(sequence, received, pts);
+        }
+        write(root + "/img/recording.dbv", data);
+        write_text(root + "/logs/frames.csv", csv);
+        write_text(root + "/detection.csv", detections);
+        Recording recording;
+        QString error;
+        require(recording.load_directory(root, {}, {}, {}, error) && recording.complete()
+                    && recording.frames().size() == count
+                    && recording.summary().contains("detection_matches=12"),
+                "current encoder records associate every frame with metadata");
+        const auto verify = [&](unsigned i) {
+            const auto& frame = recording.frames()[i];
+            require(frame.file_offset == offsets[i] && frame.file_bytes == sizes[i]
+                        && read_frame_image(frame, error) == images[i],
+                    "current encoder frame offsets and pixels survive player decoding");
+        };
+        for (unsigned i = 0; i < count; ++i)
+            verify(i);
+        for (unsigned i = count; i > 0; --i)
+            verify(i - 1);
+        for (unsigned i : {5U, 0U, 11U, 3U, 8U})
+            verify(i);
+        const auto exported = root + "/export";
+        cli({"--export-png", exported, root}, 0);
+        require(QDir(exported).entryList({"*.png"}, QDir::Files).size() == count,
+                "export includes all frames, including identical images");
+        for (unsigned i = 0; i < count; ++i)
+            require(QImage(exported + QStringLiteral("/%1.png").arg(i + 1, 8, 10, QChar('0')))
+                        == images[i], "every exported PNG preserves original binary pixels");
+        require(recording.load_directory(root, QString{}, QString{}, {}, error)
+                    && recording.frames().size() == count,
+                "current encoder images remain readable without CSV files");
+        for (unsigned i = 0; i < count; ++i)
+            require(read_frame_image(recording.frames()[i], error) == images[i],
+                    "CSV-independent decoding preserves every image");
+    }
+
+    static void binary_streams() {
+        QTemporaryDir directory;
+        require(directory.isValid(), "binary directory");
+        const auto root = directory.path();
+        require(QDir(root).mkpath("img") && QDir(root).mkpath("logs"), "binary subdirectories");
+        constexpr unsigned width = 17, height = 9, stride = 3;
+        QByteArray data(recorder::BinaryFormat::kHeaderBytes, '\0');
+        recorder::BinaryFormat::header(reinterpret_cast<std::byte*>(data.data()), width, height);
+        QByteArray bits(stride * height, '\0');
+        for (int i = 0; i < bits.size(); ++i)
+            bits[i] = static_cast<char>((i * 73 + i * i) & (i % 3 == 2 ? 128 : 255));
+        std::vector<QImage> images;
+        std::vector<qint64> offsets;
+        std::vector<qint64> sizes;
+        const auto append = [&](unsigned kind, const QByteArray& payload) {
+            const auto offset = images.empty() ? 0 : data.size();
+            std::byte prefix[5];
+            const auto length = recorder::BinaryFormat::prefix(
+                prefix, (static_cast<quint32>(payload.size()) << 2U) | kind);
+            data.append(reinterpret_cast<const char*>(prefix), static_cast<int>(length));
+            data += payload;
+            offsets.push_back(offset);
+            sizes.push_back(data.size() - offset);
+            QImage image(width, height, QImage::Format_Grayscale8);
+            for (unsigned y = 0; y < height; ++y)
+                for (unsigned x = 0; x < width; ++x)
+                    image.scanLine(y)[x] = (static_cast<unsigned char>(bits[y * stride + x / 8U])
+                                           & (128U >> (x % 8U))) ? 255 : 0;
+            images.push_back(image);
+        };
+        const auto compressed = [](const QByteArray& raw) {
+            QByteArray output(static_cast<int>(::compressBound(raw.size())), '\0');
+            uLongf bytes = output.size();
+            require(::compress2(reinterpret_cast<Bytef*>(output.data()), &bytes,
+                reinterpret_cast<const Bytef*>(raw.constData()), raw.size(), 9) == Z_OK,
+                "independent zlib fixture");
+            output.resize(static_cast<int>(bytes));
+            return output;
+        };
+        append(recorder::BinaryFormat::kRaw, bits);
+        QByteArray delta(bits.size(), '\0');
+        delta[0] = '\x80';
+        bits[0] = static_cast<char>(bits[0] ^ 128);
+        append(recorder::BinaryFormat::kDelta, compressed(delta));
+        append(recorder::BinaryFormat::kRepeat, {});
+        bits[0] = static_cast<char>(bits[0] ^ 1);
+        append(recorder::BinaryFormat::kSparse, QByteArray::fromHex("0001"));
+        bits.fill('\0');
+        append(recorder::BinaryFormat::kFull, compressed(bits));
+        append(recorder::BinaryFormat::kRepeat, {});
+        const auto path = root + "/img/recording.dbv";
+        write(path, data + QByteArray(1, '\x80')); // Interrupted varint after six full frames.
+        const QString csv_header =
+            "input_index,source_sequence,source_pts,source_pts_timebase_validated,received_us,"
+            "decision,image_index,image_file,file_offset,file_bytes\n";
+        QString rows, detection = detection_header();
+        for (unsigned i = 0; i < images.size(); ++i) {
+            rows += QStringLiteral("%1,%2,%3,0,%4,accepted,%1,img/recording.dbv,%5,%6\n")
+                .arg(i + 1).arg(101 + 100 * i).arg(1000 + 1000 * i).arg(100000 + 100000 * i)
+                .arg(offsets[i]).arg(sizes[i]);
+            detection += detection_row(QString::number(101 + 100 * i),
+                QString::number(100000 + 100000 * i), QString::number(1000 + 1000 * i));
+        }
+        const auto csv = root + "/logs/frames.csv";
+        write_text(csv, csv_header + rows);
+        write_text(root + "/detection.csv", detection);
+        Recording recording;
+        QString error;
+        require(recording.load_directory(root, {}, {}, "dbv", error), "load binary recording");
+        require(recording.complete() && recording.frames().size() == images.size(), "binary CSV associations");
+        require(recording.notes().join(' ').contains("incomplete final frame"), "binary tail ignored");
+        for (const unsigned index : {0U, 1U, 2U, 3U, 5U, 4U, 1U, 0U, 5U}) {
+            const auto& frame = recording.frames()[index];
+            require(frame.file_offset == offsets[index] && frame.file_bytes == sizes[index],
+                    "binary offset/size includes geometry only once");
+            require(read_frame_image(frame, error) == images[index] && error.isEmpty(),
+                    "binary sequential/backwards/random pixel equality");
+        }
+        require(cli({"--check", "--dbv", root}, 0).contains("images=6 recorder_matches=6 detection_matches=6"),
+                "binary headless CLI associations");
+        const auto exported = root + "/export";
+        cli({"--export-png", exported, root}, 0);
+        require(QImage(exported + "/00000002.png") == images[1], "export reconstructed PNG pixels");
+        cli({"--export-png", exported, root}, 1); // Existing images are preserved.
+        cli({"--check", "--dbv", "--png", root}, 2);
+        require(recording.load_directory(root + "/img", {}, {}, {}, error) && recording.complete(),
+                "binary img path discovers CSV");
+        Player player(recording);
+        auto* slider = player.findChild<QSlider*>("frame_slider");
+        slider->setValue(2);
+        auto* info = player.findChild<QPlainTextEdit*>("frame_info");
+        require(info && info->toPlainText().contains("source_sequence: 301")
+                && !info->toPlainText().contains("IMAGE ERROR"), "binary GUI frame identity");
+        auto corrupt = data;
+        const auto damaged = static_cast<int>(offsets[4] + sizes[4] - 1);
+        corrupt[damaged] = static_cast<char>(corrupt[damaged] ^ 1);
+        write(path, corrupt);
+        require(recording.load_directory(root, {}, {}, {}, error), "index corrupt payload without decoding");
+        require(read_frame_image(recording.frames()[4], error).isNull() && !error.isEmpty(),
+                "binary zlib checksum detects corruption");
+        require(read_frame_image(recording.frames()[0], error) == images[0], "earlier full frame remains readable");
+        write(path, data.left(static_cast<int>(offsets[4] + sizes[4] - 1)));
+        require(recording.load_directory(root, {}, {}, {}, error) && recording.frames().size() == 4
+                && !recording.complete(), "incomplete compressed tail not exposed as an image");
+        auto invalid = data;
+        invalid[12] = '\0'; // The first frame must be independent.
+        write(path, invalid);
+        require(!recording.load_directory(root, {}, {}, {}, error), "reject first-frame repeat");
+    }
+
     static void streams() {
         for (const QString& extension : {QString("pgm"), QString("pbm")}) {
             QTemporaryDir directory;

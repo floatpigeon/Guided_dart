@@ -9,6 +9,7 @@
 |---|---|---|
 | 设备组装 | `src/dart_entry.cpp` 注入工厂，`startup/` 调用服务 | `board/k230.cpp`、`camera/`、`imu/`、`spi/` |
 | 视觉流程 | `vision/capture_pipeline.cpp` 管理采集顺序、识别和帧分发 | `camera/` 管理帧池与硬件资源 |
+| 纯视觉舵机 | `vision/visual_servo.cpp` 调用 `control/` 两轴映射与限幅 | `pwm/` 管理独立输出任务、超时与 K230 HAL |
 | 录像 | `recording/frame_recording.cpp` 映射参数、决定启停并排空租约 | `recorder/` 管理队列、线程、编码和文件 |
 | 诊断 | `diagnostics/` 定义相机错误字段和检测 CSV 行 | `logging/` 管理文件缓冲和同步 |
 | 进程时限与退出 | `startup/run.cpp` 决定调用顺序 | `system/` 管理信号、时钟和 launcher 退出标记 |
@@ -17,7 +18,7 @@
 各模块包含带保护的 `.cpp`，不提供 C++ 头文件。
 `runtime/launcher/` 负责进程启动与监督；现有 `runtime/imu/` 采样服务本轮保留。
 单进程可以有多个线程或任务：当前相机调用保持串行，
-IMU 采样独立于相机逐帧循环，控制任务也应按自身频率运行。
+IMU 采样独立于相机逐帧循环；PWM 任务每 10 ms 检查视觉指令，输出 333 Hz 波形。
 
 应用组装一个 `WriteControl` 供录像、日志和 IMU 共用，外部暂停不停止采集和积分。
 `--record auto` 可使用显式配置的原始加速度阈值与持续时间请求录像，恢复写入支持新建会话。
@@ -36,11 +37,13 @@ IMU 采样独立于相机逐帧循环，控制任务也应按自身频率运行�
 ## 流水线
 
 ```
-SC038HGS RAW10 -> CSI/MCM（绕过 ISP）-> RAW10 阈值二值化 -> 归还 RAW dump
-camera->acquire(timeout) -> FrameLease（独立的 0/255 二值 Y8 缓冲）
-  -> detector.Detect(lease.view())      识别同步借用像素；不取帧、不释放租约
+SC038HGS RAW10 -> CSI/MCM（绕过 ISP）-> RAW10 >> 2 灰度解包 -> 归还 RAW dump
+camera->acquire(timeout) -> FrameLease（独立的 0..255 灰度 Y8 缓冲）
+  -> detector.Detect(lease.view())      灰度候选提取与背景对比度过滤；同步借用像素
+  -> servo.observe(result)             装甲板优先/灯回退 -> 两轴增量 -> 合成限幅
+        PWM Session                   独立输出任务；过期或无目标回各路初始脉宽
   -> recorder.try_submit(std::move(lease))
-        kAccepted     -> 已拷贝到固定队列；录像线程写独立 PNG，兼容旧 PGM/PBM 连续流
+        kAccepted     -> 已拷贝到固定队列；录像线程默认写灰度 PGM，可选灰度 PNG / 二值 DBV、PBM
         其他          -> 采集线程自己 release()
   -> recorder.drain_releases()          提交前后调用：已拷贝帧的租约在采集线程释放，
                                         保证相机 ACL 的调用始终串行
@@ -69,13 +72,22 @@ dart_app [选项]
   --exp LINES      固定曝光行数（默认 400；0 保留传感器初始曝光）
   --raw-layout F   packed10-lsb（默认，K230 实板验证）
   --vision on|off  识别开关（默认 on）
+  --pwm on|off     纯视觉 PWM 输出（默认 on；vision off 时停用）
+  --aim X,Y        全图预设像素（默认实际图像中心）
+  --servo-initial A,B,C,D     四路初始脉宽 µs（默认各 1520）
+  --servo-min A,B,C,D         四路最小脉宽 µs（默认各 1420）
+  --servo-max A,B,C,D         四路最大脉宽 µs（默认各 1620）
+  --servo-horizontal A,B,C,D  左右增益 µs/像素（默认各 0）
+  --servo-vertical A,B,C,D    上下增益 µs/像素（默认各 0）
+  --servo-timeout-ms N       无有效视觉指令时回初始位置（默认 200 ms）
   --record on|off  录像开关（默认 on）
   --rec-keep N     只保留最近 N 轮录像，0 = 不清理（默认 0）
   --rec-fps N      目标录像帧率，按时间采样（默认 60 FPS）
-  --rec-format F   png（逐帧无损压缩，默认）| pbm | pgm（旧版连续流）
+  --rec-format F   pgm（灰度，默认）| png（灰度）| dbv / pbm（二值）
   --rec-dir DIR    录像根目录（默认 /data/app/records）
   --det-csv PATH   识别结果 CSV；off 关闭（默认关闭）
-  --threshold N    RAW10 阈值 0..255，白色 >= N*4（默认 50）
+  --threshold N    灰度候选阈值 0..255（默认 50），不改变相机灰度图
+  --min-contrast N 候选与背景最小灰度差 0..255（默认 12，0 关闭）
   --log PATH       结构化日志（默认 /data/app/logs/dart_app.log）
   --imu on|off     IMU 独立采样与日志（默认 off）
   --imu-bus N      SPI 总线 0..2，启用 IMU 时必填
@@ -89,24 +101,29 @@ dart_app [选项]
 
 应用不提供采集分辨率、采集帧率或 CSI 请求参数。`--rec-fps` 仅设置录像按时间抽帧的目标速率。
 曝光/阈值默认值均为 UNVALIDATED，要用真实板端样本标定，见 [`docs/DEBUG_GUIDE.md`](../../docs/DEBUG_GUIDE.md) §5。
+PWM 默认增益为零，目标偏移不会改变脉宽。标定后通过上述参数启用各路修正，
+数值列表不含空格，通道顺序和映射符号见 [舵机控制](../control/README.md)。
+纯视觉控制不依赖 IMU，当前启动清单默认关闭 IMU。
 
 ## 故障隔离
 
-相机创建、启动或连续取帧失败时，只停用采集及依赖图像的识别/录像，记录
+相机创建、启动或连续取帧失败时，停用采集及依赖图像的识别/录像/PWM，记录
 `action=disable_capture` / `op=degraded`。应用继续等待原定 `--seconds` 时限或
 SIGINT/SIGTERM，独立 IMU 线程继续采样、积分、写日志；不反复重启整个进程。
 `--seconds 0` 下即使所有设备不可用也保持运行，周期记录状态，直到收到停止信号。
-录像启动失败只停用录像，识别工作区准备失败只停用识别；IMU 初始化失败只停用 IMU。
+录像启动失败只停用录像；识别工作区准备失败停用识别与 PWM；IMU 初始化失败只停用 IMU。
+PWM 初始化或写入失败只停用输出，识别和录像继续；取帧错误/无帧或检测失败请求初始位置，
+采集或写日志阻塞时，独立 PWM 任务仍按 `--servo-timeout-ms` 检查过期并回初始位置。
 `log_camera_error()` 只写文件日志，写入失败时保持静默，CLI 参数错误仍返回错误码。
 
 新板 IMU 接线为 SPI1、CS IO14，测试时追加 `--imu on --imu-bus 1 --imu-cs 14`。
 如需诊断 ID 异常，可再追加 `--imu-ignore-id on`；复位前后实际 ID 和 14 字节原始
 快照会写入应用日志，即使初始化失败也保留。配置读回、有效样本检查和传输错误处理继续生效。
-新版固件已接入 SC038HGS，后端通过 MCM 直采 RAW10 并直接转为二值 Y8，详见
+新版固件已接入 SC038HGS，后端通过 MCM 直采 RAW10 并解包为灰度 Y8，详见
 [`camera/README.md`](../../include/firmware/src/camera/README.md)。应用默认通过接口设置
 400 行曝光，后端同步设置 VTS=600；`--exp` 单位为行，0 保留传感器初始曝光。
 这条控制路径无需标定像素时钟或修改固件，RAW 路径不支持 `--ae`。
-开机清单使用 300 行曝光；本机已验证 RAW10 收帧、二值转换和录像落盘，目标曝光/阈值仍需标定。
+开机清单使用 400 行曝光；此前已验证 RAW10 收帧与二值录像落盘；本次灰度路径及对比度参数需重新上板标定。
 驱动未报告帧率时也允许使用已验证的图像尺寸，消费者不依赖采集帧率。
 
 ## 输出
@@ -114,7 +131,7 @@ SIGINT/SIGTERM，独立 IMU 线程继续采样、积分、写日志；不反复�
 ```
 /data/app/logs/dart_app.log                        结构化日志（状态与耗时两行共用一次 fsync，写完关闭文件）
 /data/app/logs/imu_NNNNNN.log                      每轮独立的 IMU 原始样本、积分快照和重积分事件
-/data/app/records/rec_NNNN/img/b0000001/p0000001/00000001.png  逐帧二值 PNG（每组 32 张）
+/data/app/records/rec_NNNN/img/recording.pgm         单文件灰度连续流（默认）
 /data/app/records/rec_NNNN/logs/frames.csv           每帧一行的放行记录（Recorder 写）
 /data/app/records/detection.csv                    每帧一行的识别结果（本程序写）
 ```
@@ -129,7 +146,8 @@ SIGINT/SIGTERM，独立 IMU 线程继续采样、积分、写日志；不反复�
 IMU 需要显式指定硬件接线，例如在确认 SPI0 和 HAL 默认片选适用后追加
 `--imu on --imu-bus 0 --imu-cs -1`；`--imu-log` 可改日志基名，每次启动创建新编号文件，
 例如 `imu_000001.log`、`imu_000002.log`；IMU start/stop 状态行给出实际路径。默认关闭，
-当前启动清单按新板配置 SPI1 / CS IO14。采样为独立线程，启动时等待静止样本建立单位四元数参考系；
+当前纯视觉启动清单不启用 IMU，需要时按新板配置 SPI1 / CS IO14。
+采样为独立线程，启动时等待静止样本建立单位四元数参考系；
 后续重新积分复用同一 Session 的 `seed()` / `reset()`，`current()` 返回日志里的
 同一份 Estimate。原始计数、SI 数据、积分状态、质量位及 generation 都写入日志，
 格式与接口见 [`runtime/imu/README.md`](../../runtime/imu/README.md)。
@@ -151,6 +169,7 @@ ts_ms=... level=INFO module=app op=status elapsed_s=10 frames=298 fps=29.8 no_fr
 
 ```
 step=input_stop      主循环出界（reason=signal|deadline|abort）
+module=servo op=stop 停止输出任务并关闭四路 PWM（启用时）
 step=recorder_stopped  停止录像（先停消费者；此时相机仍持有租约，不能先 stop 相机）
 step=leases_drained   排空 release 队列，租约全部在采集线程释放
 step=camera_stopped   camera.stop()
@@ -170,17 +189,21 @@ module=imu op=stop   启用时停止 IMU、排空日志队列并同步文件
 
 ```bash
 bash .script/build-rtos dart_app          # -> build-cross/dart_app/dart_app
-msh> /sdcard/app/dart_app --seconds 10 --record off     # 先只验证采集+识别
+msh> /sdcard/app/dart_app --seconds 10 --record off --pwm off  # 先只验证采集+识别
 msh> /sdcard/app/dart_app --seconds 10                  # 再验证录像落盘
 ```
 
 ## 验证状态
 
-当前默认已改为逐帧 1-bit PNG，`/sdcard/app` 启动、`/data/app/records` 保存。
-每轮 PNG 实际大小合计最多 500,000,000 字节，下一张放不下即停录、识别继续；
+纯视觉 PWM 链路已通过主机的完整图像到 PWM 回归、目标丢失/超时与故障隔离测试，
+并完成 RISC-V `dart_app` 交叉构建；真实波形、机械方向及非零增益仍需板端标定。
+
+当前默认已改为紧凑 1-bit DBV，`/sdcard/app` 启动、`/data/app/records` 保存。
+每轮 DBV 文件（包括共享文件头）最多 500,000,000 字节，下一张放不下即停录、识别继续；
 `/data` 分区总占用上限为 2,000,000,000 字节，包含旧录像、日志及分配开销，
 并在总量与物理空间内保留 64 MiB，不足时停录且保留旧文件。
-以下 PBM 数字为此前版本实测，不能作为新 PNG 的帧率。
+DBV 采用空间优先的 level 9 压缩，板端实际帧率需重新测量。
+以下 PBM 数字为此前版本实测，不能作为新 DBV 的帧率。
 
 2026-10-20，当前完整工作区代码交叉编译通过，主机 14 项回归全部通过，应用经 MTP
 写入 `/sdcard/app/dart_app` 并完整回读校验。录像和日志写入 `/data/app`，连续复位分别
@@ -212,7 +235,7 @@ IMU 继续采样，以及 SPI 创建失败后的清理；当时 SPI1 / CS IO14 �
   `-fno-exceptions -fno-rtti`，静态链接 RT-Smart ELF，约 1.7 MB）。
 - **待板端验证**：目标场景的曝光/阈值标定、RVV 与 cache/DMA 的完整压力测试、
   高帧率下的丢帧与长期稳定性；识别质量与性能尚未验证。
-- 本程序**不**包含硬件 H.264/VENC：v2 的录像为逐帧 PNG，兼容旧 PGM/PBM 流。
+- 本程序**不**包含硬件 H.264/VENC：v2 的默认录像为 DBV，兼容 PNG 与旧 PGM/PBM 流。
 
 ## 历史 90 fps 配置与耗时统计（2026-10-15，旧板）
 

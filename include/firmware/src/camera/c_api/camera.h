@@ -9,9 +9,9 @@
 extern "C" {
 #endif
 
-#define DART_CAMERA_ABI_VERSION 5u
+#define DART_CAMERA_ABI_VERSION 6u
 #define DART_CAMERA_MAX_BUFFERS 10u
-/* Ceiling for config.max_outstanding_frames. A held lease keeps one binary
+/* Ceiling for config.max_outstanding_frames. A held lease keeps one grayscale
  * CPU slot busy. RAW DMA dumps are released before a lease is published.
  */
 #define DART_CAMERA_MAX_OUTSTANDING_FRAMES 10u
@@ -55,7 +55,7 @@ typedef struct dart_camera_config {
     uint32_t output_width;    /* Both zero: follow mode; RAW backend requires native size. */
     uint32_t output_height;
     uint32_t capture_buffers; /* Reserved capacity hint, 3..10; K230 MCM ring is fixed at 4. */
-    uint32_t channel_buffers; /* Binary lease capacity bound, 3..10. */
+    uint32_t channel_buffers; /* Grayscale lease capacity bound, 3..10. */
     uint32_t max_outstanding_frames; /* 1..channel_buffers and <= MAX_OUTSTANDING.
                                       * Capacity is injected by the caller: it may
                                       * hold this many frames at once. 1 keeps the
@@ -64,7 +64,6 @@ typedef struct dart_camera_config {
     uint32_t initial_exposure_lines;
     uint32_t mirror;                 /* 0: none, 1: horizontal, 2: vertical, 3: both. */
     uint32_t raw10_layout;           /* Explicit DDR packing; verify with sensor test pattern. */
-    uint32_t binary_threshold;       /* 0..255, white iff RAW10 >= threshold * 4. */
 } dart_camera_config_t;
 
 typedef struct dart_camera_caps {
@@ -81,7 +80,7 @@ typedef struct dart_camera_caps {
 typedef struct dart_camera_frame {
     uint32_t abi_version;
     uint32_t struct_size;
-    /* Read-only binary Y8 (0=black, 255=white), valid until successful release.
+    /* Read-only linear grayscale Y8 (RAW10 >> 2), valid until successful release.
      * Each lease owns a separate preallocated CPU buffer. RAW DMA memory is
      * never modified. Every row is stride bytes; width bytes are pixels.
      */
@@ -128,7 +127,7 @@ int dart_camera_start(dart_camera_t* camera);
  */
 int dart_camera_acquire_frame(
     dart_camera_t* camera, uint32_t timeout_ms, dart_camera_frame_t* frame);
-/* Releases the binary CPU slot. A stale, doubled or foreign token is rejected
+/* Releases the grayscale CPU slot. A stale, doubled or foreign token is rejected
  * and changes nothing. RAW dumps were released before acquisition returned.
  */
 int dart_camera_release_frame(dart_camera_t* camera, const dart_camera_frame_t* frame);

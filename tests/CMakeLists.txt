@@ -7,7 +7,13 @@ target_link_libraries(camera_raw10_test PRIVATE dart_camera_core)
 target_compile_options(camera_raw10_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME camera_raw10 COMMAND camera_raw10_test)
 
-foreach(_test recorder_session detector_behavior camera_contract camera_adapter imu_estimator imu_session argument_parser service_isolation binary_pipeline write_control)
+add_executable(canmv_detector_bridge_test canmv_detector_bridge_test.cpp
+    "${PROJECT_SOURCE_DIR}/tools/canmv_tuning/detector_bridge.cpp")
+target_link_libraries(canmv_detector_bridge_test PRIVATE dart_detection)
+target_compile_options(canmv_detector_bridge_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME canmv_detector_bridge COMMAND canmv_detector_bridge_test)
+
+foreach(_test recorder_session recorder_binary detector_behavior detector_tracking camera_contract camera_adapter imu_estimator imu_session argument_parser service_isolation binary_pipeline write_control)
     add_executable(${_test}_test "${_test}_test.cpp")
     target_link_libraries(${_test}_test PRIVATE dart_detection dart_recording dart_imu dart_imu_logging dart_platform)
     target_compile_options(${_test}_test PRIVATE -Werror -UNDEBUG)
@@ -15,6 +21,16 @@ foreach(_test recorder_session detector_behavior camera_contract camera_adapter 
 endforeach()
 
 target_link_options(imu_session_test PRIVATE -Wl,--wrap=fwrite)
+
+add_executable(servo_mapping_test servo_mapping_test.cpp)
+target_link_libraries(servo_mapping_test PRIVATE dart_control)
+target_compile_options(servo_mapping_test PRIVATE -Werror -UNDEBUG)
+add_test(NAME servo_mapping COMMAND servo_mapping_test)
+
+add_executable(visual_servo_test visual_servo_test.cpp)
+target_link_libraries(visual_servo_test PRIVATE dart_control dart_detection dart_platform dart_pwm)
+target_compile_options(visual_servo_test PRIVATE -Werror -UNDEBUG)
+add_test(NAME visual_servo COMMAND visual_servo_test)
 
 add_executable(recorder_storage_test recorder_storage_test.cpp)
 target_link_libraries(recorder_storage_test PRIVATE dart_recording)
@@ -44,6 +60,12 @@ endif()
 set(_pwm_hal_include "${K230_SDK_ROOT}/src/rtsmart/libs/rtsmart_hal/drivers/pwm")
 set(_fpioa_hal_include "${K230_SDK_ROOT}/src/rtsmart/libs/rtsmart_hal/drivers/fpioa")
 if(EXISTS "${_pwm_hal_include}/drv_pwm.h" AND EXISTS "${_fpioa_hal_include}/drv_fpioa.h")
+    add_executable(pwm_output_test pwm_output_test.cpp)
+    target_link_libraries(pwm_output_test PRIVATE dart_pwm)
+    target_include_directories(pwm_output_test PRIVATE "${_pwm_hal_include}" "${_fpioa_hal_include}")
+    target_compile_options(pwm_output_test PRIVATE -Werror -UNDEBUG)
+    add_test(NAME pwm_output COMMAND pwm_output_test)
+
     add_library(pwm_swing_under_test OBJECT "${PROJECT_SOURCE_DIR}/tools/pwm_swing/main.c")
     target_compile_definitions(pwm_swing_under_test PRIVATE main=pwm_swing_main)
     target_include_directories(pwm_swing_under_test PRIVATE "${_pwm_hal_include}" "${_fpioa_hal_include}")
@@ -60,8 +82,10 @@ endif()
 
 # Compile several consumers of overlapping C++ files and link them together.
 add_library(dart_odr_consumer OBJECT odr_consumer.cpp)
-target_link_libraries(dart_odr_consumer PRIVATE dart_detection dart_recording dart_imu)
+target_link_libraries(dart_odr_consumer PRIVATE dart_detection dart_recording dart_imu dart_control)
 target_sources(camera_contract_test PRIVATE $<TARGET_OBJECTS:dart_odr_consumer>)
+target_sources(servo_mapping_test PRIVATE $<TARGET_OBJECTS:dart_odr_consumer>)
+target_link_libraries(servo_mapping_test PRIVATE dart_detection dart_recording dart_imu)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME rtos_scripts

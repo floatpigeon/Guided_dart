@@ -16,6 +16,7 @@
 #include "src/diagnostics/detection_csv.cpp"
 #include "src/recording/frame_recording.cpp"
 #include "src/startup/argument_parser.cpp"
+#include "src/vision/visual_servo.cpp"
 #include "system/monotonic_clock.cpp"
 #include "system/run_control.cpp"
 
@@ -49,6 +50,7 @@ private:
         std::uint64_t lease_exhausted = 0;
         std::uint64_t acquire_errors = 0;
         std::uint64_t detect_calls = 0;
+        std::uint64_t detect_frames = 0, track_frames = 0, validation_frames = 0, stability_checks = 0;
         std::uint64_t detect_errors = 0;
         std::uint64_t target_hits = 0;
         std::uint64_t release_ok = 0;
@@ -63,7 +65,8 @@ public:
     static int execute(
         const Arguments& args, std::unique_ptr<camera::ICamera> cam, platform::RunControl& control,
         logging::Logger& log, imu::Session* imu_session = nullptr,
-        platform::WriteControl* writes = nullptr) noexcept {
+        platform::WriteControl* writes = nullptr,
+        platform::PwmFactory pwm_factory = nullptr) noexcept {
         bool vision_on = args.vision_on;
         bool record_on = args.record_on;
         log.line(
@@ -71,9 +74,8 @@ public:
             cam->capacity(), cam->frame_info().width, cam->frame_info().height);
 
         detection::RoiDetector::Config detect_config{};
-        /* Camera already thresholds RAW10. Consumers classify only 0/255;
-         * using a fixed midpoint also handles --threshold 0 correctly. */
-        detect_config.threshold = 128;
+        detect_config.threshold = static_cast<std::uint8_t>(args.threshold);
+        detect_config.workspace.min_contrast = args.min_contrast;
         detection::RoiDetector detector{detect_config};
         const auto max_width = cam->frame_info().width;
         const auto max_height = cam->frame_info().height;
@@ -89,8 +91,8 @@ public:
             if (vision_on)
                 log.line(
                     "level=INFO module=app op=detector_prepare result=ok max=%ux%u "
-                    "raw_threshold=%u input=binary8\n",
-                    max_width, max_height, args.threshold);
+                    "threshold=%u min_contrast=%g input=gray8\n",
+                    max_width, max_height, args.threshold, static_cast<double>(args.min_contrast));
         }
 
         const auto recorder_config = recording_config(args, max_width, max_height);
@@ -116,6 +118,10 @@ public:
             "level=INFO module=app op=camera_start result=ok state=%u\n",
             static_cast<unsigned>(cam->state()));
 
+        VisualServo servo{args, log};
+        if (vision_on)
+            servo.start(pwm_factory, max_width, max_height);
+
         if (record_on) {
             record_on = writes != nullptr ? rec.start_controlled(*writes)
                                           : start_recording(rec, recorder_config, log);
@@ -140,6 +146,7 @@ public:
                                             .count();
                 const auto stats = rec.stats();
                 log.begin_batch();
+                servo.status();
                 if (writes != nullptr)
                     log.line(
                         "level=INFO module=app op=write_control recording=%d logging=%d "
@@ -170,6 +177,13 @@ public:
                     static_cast<unsigned long long>(stats.event_dropped),
                     static_cast<unsigned long long>(counters.release_errors),
                     detector.run_high_water());
+                log.line(
+                    "level=INFO module=app op=detect_track detect_frames=%llu track_frames=%llu "
+                    "validation_frames=%llu stability_checks=%llu\n",
+                    static_cast<unsigned long long>(counters.detect_frames),
+                    static_cast<unsigned long long>(counters.track_frames),
+                    static_cast<unsigned long long>(counters.validation_frames),
+                    static_cast<unsigned long long>(counters.stability_checks));
                 if (stats.written > 0)
                     log.line(
                         "level=INFO module=app op=recorder_timing bytes=%llu "
@@ -239,6 +253,7 @@ public:
             auto acquired = cam->acquire(std::chrono::milliseconds{args.acquire_ms});
             acquire_timing.observe(acquire_begin);
             if (!acquired) {
+                servo.observe(nullptr);
                 counters.acquire_errors++;
                 consecutive_acquire_errors++;
                 log_camera_error(log, "camera_acquire", "retry", acquired.error());
@@ -256,12 +271,14 @@ public:
             consecutive_acquire_errors = 0;
 
             if (acquired->status == camera::AcquireStatus::kNoFrame) {
+                servo.observe(nullptr);
                 /* 正常否定结果：不是错误，只计数。 */
                 counters.no_frame++;
                 (void)rec.drain_releases();
                 continue;
             }
             if (acquired->status == camera::AcquireStatus::kLeaseExhausted) {
+                servo.observe(nullptr);
                 /* 容量性丢弃：驱动从未被触碰，这一帧在驱动池里自生自灭。 */
                 counters.lease_exhausted++;
                 (void)rec.drain_releases();
@@ -289,11 +306,18 @@ public:
                         static_cast<unsigned long long>(view.sequence));
                 } else {
                     result = detected.value();
+                    if (result.scan.phase == detection::DetectionPhase::kTrack) ++counters.track_frames;
+                    else ++counters.detect_frames;
+                    if (result.scan.full_validation) ++counters.validation_frames;
+                    counters.stability_checks += result.scan.stability_checks;
                     result_ptr = &result;
                     if (result.target.valid)
                         counters.target_hits++;
                 }
             }
+
+            // Publish the current full-image observation before any recording IO.
+            servo.observe(result_ptr);
 
             /* 所有权：只有 kAccepted 会把租约转给 Recorder。 */
             const auto pipeline_begin = std::chrono::steady_clock::now();
@@ -344,6 +368,8 @@ public:
             "frames=%llu\n",
             capture_failed ? "camera_failure" : control.reason(),
             static_cast<unsigned long long>(counters.frames));
+
+        servo.stop();
 
         if (record_on) {
             rec.stop();

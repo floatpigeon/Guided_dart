@@ -14,6 +14,16 @@ file(GLOB_RECURSE _detection_classes CONFIGURE_DEPENDS "detector/*.cpp")
 add_library(dart_detection_checks OBJECT ${_detection_classes})
 target_link_libraries(dart_detection_checks PRIVATE dart_detection)
 
+add_library(dart_control INTERFACE)
+target_compile_features(dart_control INTERFACE cxx_std_23)
+target_compile_options(dart_control INTERFACE
+    -Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti)
+target_include_directories(dart_control INTERFACE "${PROJECT_SOURCE_DIR}")
+
+file(GLOB_RECURSE _control_classes CONFIGURE_DEPENDS "control/*.cpp")
+add_library(dart_control_checks OBJECT ${_control_classes})
+target_link_libraries(dart_control_checks PRIVATE dart_control)
+
 # dart_app: one process owns VICAP/VB and connects devices, domain and runtime.
 if(DART_CAMERA_K230)
     add_executable(dart_app dart_entry.cpp)
@@ -23,7 +33,7 @@ if(DART_CAMERA_K230)
         "${PROJECT_SOURCE_DIR}"
         "${PROJECT_SOURCE_DIR}/include/firmware/src")
     target_link_libraries(dart_app PRIVATE
-        dart_detection dart_recording dart_imu_logging dart_platform dart_board Threads::Threads)
+        dart_detection dart_control dart_recording dart_imu_logging dart_pwm dart_platform dart_board Threads::Threads)
     set_target_properties(dart_app PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dart_app")
 else()
@@ -35,4 +45,4 @@ endif()
 file(GLOB_RECURSE _application_classes CONFIGURE_DEPENDS
     "startup/*.cpp" "vision/*.cpp" "recording/*.cpp" "diagnostics/*.cpp")
 add_library(dart_application_checks OBJECT ${_application_classes})
-target_link_libraries(dart_application_checks PRIVATE dart_detection dart_recording dart_imu_logging dart_platform)
+target_link_libraries(dart_application_checks PRIVATE dart_detection dart_control dart_recording dart_imu_logging dart_pwm dart_platform)

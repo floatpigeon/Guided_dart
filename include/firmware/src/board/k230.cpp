@@ -3,6 +3,7 @@
 
 #include <expected>
 #include <memory>
+#include <new>
 #include <utility>
 
 #include "camera/k230/camera.cpp"
@@ -13,8 +14,22 @@
 #ifdef DART_APP_IMU_K230
 # include "imu/k230/iim42652.cpp"
 #endif
+#ifdef DART_APP_PWM_K230
+# include "pwm/k230/output.cpp"
+#endif
 
 namespace dart::board {
+
+inline std::expected<std::unique_ptr<pwm::IPwm>, pwm::Error> create_pwm() noexcept {
+#ifdef DART_APP_PWM_K230
+    auto* device = new (std::nothrow) pwm::k230::Output;
+    if (device == nullptr)
+        return std::unexpected(pwm::Error{"allocate", -1, -1});
+    return std::unique_ptr<pwm::IPwm>{device};
+#else
+    return std::unexpected(pwm::Error{"backend_unavailable", -1, -1});
+#endif
+}
 
 inline std::expected<std::unique_ptr<camera::ICamera>, camera::CameraError>
     create_camera(const camera::Controls& controls) noexcept {

@@ -27,7 +27,6 @@ public:
     ExposureMode exposure_mode = ExposureMode::kFixed;
     std::uint32_t initial_exposure_lines = 0; /* Keep the sensor's initialized exposure. */
     Raw10Layout raw10_layout = Raw10Layout::kPackedLsb;
-    std::uint32_t binary_threshold = 50;
 };
 
 /* Actual frame geometry, available after creation for consumer allocation. */

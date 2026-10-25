@@ -3,13 +3,13 @@
 移植来源：远程 `origin/k230_v1` 的 `tools/video_player`，提交
 [`a739026`](https://github.com/hyperle/Guided_dart/tree/a7390262203f2565876aef1d2a8b628b2722d79f/tools/video_player)。
 保留 Qt Widgets 的滑块、左右键、图像缩放、像素点击和检测叠加，按当前 v2
-的逐帧 PNG、旧版 PGM/PBM 连续流及逐帧文件、录像 CSV 和检测 CSV 重写数据关联。与 v1 一样为手动逐帧浏览，
+的紧凑 DBV、逐帧 PNG、旧版 PGM/PBM 连续流及逐帧文件、录像 CSV 和检测 CSV 重写数据关联。与 v1 一样为手动逐帧浏览，
 不按时间自动播放。支持 Qt 5 / Qt 6，不依赖 ROS、SDK 或板端构建。
 
 ## 构建与打开
 
 本机已具备 Qt 5 开发环境。其他 Debian/Ubuntu 主机可安装 `cmake`、`g++`、
-`qtbase5-dev`；需要图形桌面来显示窗口。在仓库根目录运行：
+`qtbase5-dev`、`zlib1g-dev`；需要图形桌面来显示窗口。在仓库根目录运行：
 
 ```bash
 # 自动增量构建并打开；也可从其他目录调用 .script/player 的绝对路径。
@@ -19,7 +19,7 @@ bash .script/player records
 # 也可只打开一段板端原始会话目录。
 bash .script/player records/rec_0001
 
-# 默认显示 PNG/PGM/PBM；--png 仅看 PNG，-r 仅看 PGM，-f 仅看 PBM。
+# 默认显示 DBV/PNG/PGM/PBM；--dbv/--png 筛选格式，-r 看 PGM，-f 看 PBM。
 bash .script/player -r records/rec_0001
 
 # 拷贝位置不同可显式指定两个 CSV；包含空格的路径加引号。
@@ -46,9 +46,7 @@ cmake --build build/video_player --parallel
 ```text
 records/
   frames.csv
-  b0000001/p0000001/00000001.png
-  b0000001/p0000001/00000002.png
-  b0000001/p0000002/00000033.png
+  recording.pgm                     # 默认灰度格式；也支持 DBV 与 PNG 分组目录
   detection.csv                       # 可选
 ```
 
@@ -70,8 +68,7 @@ records/
 records/
   detection.csv
   rec_0001/
-    img/b0000001/p0000001/00000001.png  # 每组 32 张，支持后续 b0000001/p0000002
-    img/b0000001/p0000001/00000002.png
+    img/recording.dbv
     logs/frames.csv
 ```
 
@@ -80,9 +77,23 @@ records/
 每轮结束后应将对应的 `detection.csv` 连同该轮目录一起归档，或启动时通过
 `--det-csv` 指定不同路径。已被覆盖的数据无法从图片恢复，播放器会显示未匹配。
 
+## DBV 浏览与导出
+
+默认板端输出 `img/recording.pgm`，显式选择 DBV 时输出 `img/recording.dbv`，停止录像后再通过 MTP 拷贝此文件和 CSV。
+播放器自动解码为黑白像素，界面按钮可导出当前帧的 PNG（不含叠加标记）。
+批量导出不需要桌面环境，按整个输入序列连续编号，遇到已存在的图片会拒绝覆盖：
+
+```bash
+bash .script/player --export-png /tmp/dart-export records/rec_0001
+```
+
+文件格式、无校验记录及差分依赖的限制见 [录像格式说明](../../include/firmware/src/recorder/README.md)。
+
 ## 图片、文字与叠加如何对应
 
-1. 对 `img/recording.pgm` / `.pbm` 扫描帧头并建立字节偏移索引，跳过像素负载；
+1. 对 `img/recording.dbv` 扫描共享文件头及变长记录，建立偏移和差分依赖索引；
+   不依赖 CSV 解码图片，也不额外保存索引文件。顺序浏览缓存上一帧；旧版重复帧记录仍可读取。
+   随机/向后跳转从最近完整帧重建，长差分链的跳转耗时会增加。对 `img/recording.pgm` / `.pbm` 扫描帧头并建立字节偏移索引，跳过像素负载；
    复位导致的不完整尾帧会提示并忽略。独立 PNG 支持 `img/bNNNNNNN/pNNNNNNN/00000001.png`，兼容旧版 `img/frame_*.pgm` / `.pbm`；按图片数字编号排序。
    只读取和解码当前选中帧，不把整个录像载入内存。
 2. 用 `frames.csv` 的 **`image_file + file_offset`** 精确匹配连续帧，校验 `file_bytes`、
@@ -138,7 +149,9 @@ python3 tests/check_cpp_structure.py
 `image_view.cpp` 管理显示和原图坐标映射，`player.cpp` 组合窗口与命令入口，
 `main.cpp` 仅转交入口。可包含 `.cpp` 使用包含保护、
 单个具名命名空间及 inline 定义；CMake 分别编译每个组件以验证独立包含。
-测试使用 Qt offscreen 平台，不需要实际显示器，覆盖真实 PNG/PGM/PBM 解码、单色 1-bit PNG、
+测试使用 Qt offscreen 平台，不需要实际显示器，覆盖 DBV 完整帧/差分/旧版重复/异常尾部及 PNG 导出，
+并直接调用当前板端编码器生成含相同输入、阈值边界及非整字节行宽的录像，核对每帧像素、
+顺序/向后/随机跳帧、CSV 偏移与检测关联、全部 PNG 导出及脱离 CSV 的独立解码；另覆盖真实 PNG/PGM/PBM 解码、单色 1-bit PNG、
 当前拷贝布局、缺少日志的尾部图片与空 PNG、默认 CSV 路径、PNG 跨分组目录关联及偏移/长度冲突、非整字节 PBM
 行宽、序号/时间身份、空 CSV 与空路径参数、缺图与重复记录、关闭识别、叠加边界、切帧和像素点击。
 

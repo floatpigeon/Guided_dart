@@ -20,25 +20,26 @@ namespace dart::app {
 inline int run_services(
     const Arguments& args, platform::CameraFactory factory, platform::RunControl& control,
     logging::Logger& log, imu::Session* imu_session = nullptr,
-    platform::WriteControl* writes = nullptr) noexcept {
+    platform::WriteControl* writes = nullptr,
+    platform::PwmFactory pwm_factory = nullptr) noexcept {
     log.line(
         "level=INFO module=app op=start version=4 exposure=fixed exp_lines=%u "
-        "vision=%d record=%d record_auto=%d rec_fps=%u rec_keep=%u seconds=%u imu=%d "
-        "capture=mcm_raw10 output=binary8 raw_layout=%u threshold=%u\n",
-        args.exposure_lines, args.vision_on, args.record_on, args.record_auto, args.record_fps, args.record_keep,
+        "vision=%d pwm=%d record=%d record_auto=%d rec_fps=%u rec_keep=%u seconds=%u imu=%d "
+        "capture=mcm_raw10 output=gray8 raw_layout=%u threshold=%u\n",
+        args.exposure_lines, args.vision_on, args.pwm_on, args.record_on, args.record_auto, args.record_fps, args.record_keep,
         args.seconds, imu_session != nullptr, static_cast<unsigned>(args.raw10_layout),
         args.threshold);
     camera::Controls controls{};
     controls.initial_exposure_lines = args.exposure_lines;
     controls.raw10_layout = args.raw10_layout;
-    controls.binary_threshold = args.threshold;
     auto created = factory(controls);
     bool camera_failed = !created;
     if (!created) {
         log_camera_error(log, "create", "disable_capture", created.error());
     } else {
         camera_failed =
-            CapturePipeline::execute(args, std::move(created.value()), control, log, imu_session, writes)
+            CapturePipeline::execute(args, std::move(created.value()), control, log, imu_session, writes,
+                                     pwm_factory)
             != 0;
     }
     if (camera_failed) {

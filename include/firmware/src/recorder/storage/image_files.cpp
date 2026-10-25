@@ -85,7 +85,9 @@ inline bool ImageFiles::png_path(
 
 inline bool ImageFiles::space_available(std::size_t bytes) noexcept {
     constexpr std::uint64_t guard = 1024U * 1024U;
-    const auto charge = std::max<std::uint64_t>(bytes + guard, guard * 2U);
+    const bool continuous = config_.image_format == ImageFormat::kDbv;
+    const auto charge = continuous ? static_cast<std::uint64_t>(bytes)
+                                  : std::max<std::uint64_t>(bytes + guard, guard * 2U);
     if (space_checks_remaining_ > 0 && space_budget_ >= charge) {
         --space_checks_remaining_;
         space_budget_ -= charge;
@@ -97,8 +99,11 @@ inline bool ImageFiles::space_available(std::size_t bytes) noexcept {
         return false;
     // Include allocation rounding and room for directory growth. Logical PNG
     // sizes alone substantially underestimate FAT usage for small images.
-    const auto allocation =
-        std::max<std::uint64_t>(charge, ((bytes + block - 1U) / block + 2U) * block);
+    // Continuous DBV records share clusters. Cover pending stdio bytes once
+    // per query instead of charging every small record as an independent file.
+    const auto allocation = continuous
+        ? ((bytes + 256U * 1024U + block - 1U) / block) * block
+        : std::max<std::uint64_t>(charge, ((bytes + block - 1U) / block + 2U) * block);
     if (available < allocation) {
         errno = ENOSPC;
         return false;

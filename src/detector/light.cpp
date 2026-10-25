@@ -10,6 +10,7 @@
 #include "geometry.cpp"
 #include "numeric.cpp"
 #include "result.cpp"
+#include "tracking.cpp"
 
 namespace dart::detection {
 
@@ -36,21 +37,31 @@ public:
     LightDetector() noexcept;
     explicit LightDetector(Config config) noexcept;
     bool ValidConfig() const noexcept;
-    Target Detect(std::span<const Blob> blobs, std::uint64_t frame_area) const noexcept;
+    Target Detect(std::span<const Blob> blobs, std::uint64_t frame_area,
+                  const Blob** selected = nullptr) const noexcept;
+    Target Track(std::span<const Blob> blobs, std::uint64_t frame_area,
+                 const TargetTracker& tracker, const Target& predicted,
+                 const Blob** selected = nullptr) const noexcept;
+    static Target TargetFromBlob(const Blob& blob) noexcept {
+        return {
+            true, blob.center, blob.bounds, blob.area,
+            std::sqrt(static_cast<float>(blob.area) / static_cast<float>(kPi)),
+            blob.gray_quality * (blob.clipped ? 0.25F : 1.0F),
+            blob.clipped, blob.contrast, blob.snr, blob.stability, 0.0F, 0.0F,
+            blob.stability_checked};
+    }
 
 private:
     Config config_;
-
-private:
-    static Target TargetFromBlob(const Blob& blob) noexcept {
-        return {
-            true,
-            blob.center,
-            blob.bounds,
-            blob.area,
-            std::sqrt(static_cast<float>(blob.area) / static_cast<float>(kPi)),
-            blob.clipped ? 0.25F : 1.0F,
-            blob.clipped};
+    bool Eligible(const Blob& blob, std::uint64_t frame_area) const noexcept {
+        if (blob.bounds.width == 0 || blob.bounds.height == 0) return false;
+        const float aspect = static_cast<float>(blob.bounds.width) / blob.bounds.height;
+        const bool far = blob.area < config_.far_area_threshold
+            || std::max(blob.bounds.width, blob.bounds.height) < config_.far_size_px;
+        return blob.area >= config_.min_area
+            && static_cast<float>(blob.area) <= static_cast<float>(frame_area) * config_.max_area_fraction
+            && (far || (blob.fill >= config_.min_fill && blob.circularity >= config_.min_circularity
+                && aspect >= config_.aspect_min && aspect <= config_.aspect_max));
     }
 };
 
@@ -69,40 +80,46 @@ inline bool LightDetector::ValidConfig() const noexcept {
 }
 
 inline Target
-    LightDetector::Detect(std::span<const Blob> blobs, std::uint64_t frame_area) const noexcept {
+    LightDetector::Detect(std::span<const Blob> blobs, std::uint64_t frame_area,
+                          const Blob** selected) const noexcept {
     const Blob* best = nullptr;
     float best_score = -1.0F;
     for (const auto& blob : blobs) {
-        if (blob.bounds.width == 0 || blob.bounds.height == 0)
-            continue;
-        const float aspect =
-            static_cast<float>(blob.bounds.width) / static_cast<float>(blob.bounds.height);
-        const bool far = blob.area < config_.far_area_threshold
-                      || std::max(blob.bounds.width, blob.bounds.height) < config_.far_size_px;
-        if (blob.area < config_.min_area
-            || static_cast<float>(blob.area)
-                   > static_cast<float>(frame_area) * static_cast<float>(config_.max_area_fraction)
-            || (!far
-                && (blob.fill < config_.min_fill || blob.circularity < config_.min_circularity
-                    || aspect < config_.aspect_min || aspect > config_.aspect_max)))
-            continue;
+        if (!Eligible(blob, frame_area)) continue;
         const float roundness = std::max(0.05F, blob.circularity);
         const float weight = config_.circularity_weight;
         const float shape = weight == 0.0F ? 1.0F
                           : weight == 1.0F ? roundness
                                            : std::pow(roundness, weight);
-        const float score = static_cast<float>(blob.area) * shape;
+        const float score = static_cast<float>(blob.area) * shape * std::max(0.05F, blob.gray_quality);
         if (score > best_score) {
             best = &blob;
             best_score = score;
         }
     }
+    if (selected) *selected = best;
+    return best ? TargetFromBlob(*best) : Target{};
+}
+
+inline Target LightDetector::Track(
+    std::span<const Blob> blobs, std::uint64_t frame_area, const TargetTracker& tracker,
+    const Target& predicted, const Blob** selected) const noexcept {
+    const Blob* best = nullptr;
+    float cost = std::numeric_limits<float>::infinity();
+    for (const auto& blob : blobs) {
+        if (!Eligible(blob, frame_area)) continue;
+        const float candidate = tracker.MatchCost(TargetFromBlob(blob), predicted)
+                              + 0.05F * (1.0F - blob.gray_quality);
+        if (candidate < cost) { best = &blob; cost = candidate; }
+    }
+    if (selected) *selected = best;
     return best ? TargetFromBlob(*best) : Target{};
 }
 
 class LightTracker {
 public:
-    explicit LightTracker(LightDetector::Config config) noexcept;
+    explicit LightTracker(LightDetector::Config config,
+                          TargetTracker::Config track = {}) noexcept;
     bool ValidConfig() const noexcept;
     bool Confirm(Target& light, std::uint64_t frame_id, const Target& previous) noexcept;
     void ClearConfirmation() noexcept;
@@ -121,11 +138,12 @@ private:
     };
 
     LightDetector::Config config_;
+    TargetTracker::Config track_config_;
     State state_{};
 };
 
-inline LightTracker::LightTracker(LightDetector::Config config) noexcept
-    : config_(config) {}
+inline LightTracker::LightTracker(LightDetector::Config config, TargetTracker::Config track) noexcept
+    : config_(config), track_config_(track) {}
 
 inline bool LightTracker::ValidConfig() const noexcept {
     return config_.confirm_frames > 0 && config_.far_confirm_frames > 0
@@ -147,10 +165,16 @@ inline bool
     if (!light.valid) {
         state_.hits = 0;
         state_.last_measurement = {};
+        state_.locked = false;
         return false;
     }
     const bool far = light.area < config_.far_area_threshold
                   || std::max(light.bounds.width, light.bounds.height) < config_.far_size_px;
+    if (state_.last_measurement.valid && !std::isfinite(TargetTracker::MatchCost(
+            light, state_.last_measurement, state_.last_measurement, track_config_))) {
+        state_.hits = 0;
+        state_.locked = false;
+    }
     if (far && state_.last_measurement.valid) {
         const float jump = std::max(
             static_cast<float>(config_.far_jump_min_px),
@@ -159,8 +183,10 @@ inline bool
                     state_.last_measurement.bounds.width, state_.last_measurement.bounds.height)));
         const float dx = light.center.x - state_.last_measurement.center.x;
         const float dy = light.center.y - state_.last_measurement.center.y;
-        if (std::fabs(dx) > jump || std::fabs(dy) > jump)
+        if (std::fabs(dx) > jump || std::fabs(dy) > jump) {
             state_.hits = 0;
+            state_.locked = false;
+        }
     }
     state_.last_measurement = light;
     IncrementSaturated(state_.hits);
@@ -173,7 +199,7 @@ inline bool
         && std::fabs(light.center.x - previous.center.x) <= static_cast<float>(config_.deadband_px)
         && std::fabs(light.center.y - previous.center.y)
                <= static_cast<float>(config_.deadband_px)) {
-        light = previous;
+        light.center = previous.center;
     }
     return true;
 }

@@ -32,7 +32,7 @@ public:
 
 using FrameEventSink = void (*)(const FrameEvent&, void*) noexcept;
 
-enum class ImageFormat : std::uint8_t { kPgm, kPbm, kPng };
+enum class ImageFormat : std::uint8_t { kPgm, kPbm, kPng, kDbv };
 
 class Config {
 public:
@@ -58,8 +58,8 @@ public:
     /* Separate bounded metadata queue for one CSV row per enqueued submission; drops
      * are counted instead of blocking capture. */
     std::uint32_t event_slots = 512;
-    /* Recheck free space at most this many images apart. A conservative 2 MiB
-     * allocation per image is charged between queries, including tiny files. */
+    /* Recheck free space at most this many images apart. DBV charges actual
+     * record bytes; other formats retain the conservative 2 MiB charge. */
     std::uint32_t storage_check_frames = 32;
     ImageFormat image_format = ImageFormat::kPgm;
     std::uint8_t pbm_threshold = 128;
@@ -68,6 +68,10 @@ public:
     std::uint32_t keep_sessions = 0; /* 0 = never remove earlier sessions */
     FrameEventSink event_sink = nullptr;
     void* event_sink_context = nullptr;
+
+    bool variable_record_size() const noexcept {
+        return image_format == ImageFormat::kPng || image_format == ImageFormat::kDbv;
+    }
 };
 
 } // namespace dart::recorder

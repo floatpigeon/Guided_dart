@@ -12,11 +12,10 @@ void dart_camera_config_init(dart_camera_config_t* config) {
     config->struct_size = sizeof(*config);
     config->capture_buffers = 4;
     config->channel_buffers = 4;
-    /* Each held lease keeps one binary CPU slot busy. */
+    /* Each held lease keeps one grayscale CPU slot busy. */
     config->max_outstanding_frames = 1;
     config->exposure_mode = DART_CAMERA_EXPOSURE_FIXED;
     config->raw10_layout = DART_CAMERA_RAW10_PACKED_LSB;
-    config->binary_threshold = 50;
 }
 
 int dart_camera_config_validate(const dart_camera_config_t* config) {
@@ -45,7 +44,7 @@ int dart_camera_config_validate(const dart_camera_config_t* config) {
         || config->max_outstanding_frames == 0u
         || config->max_outstanding_frames > DART_CAMERA_MAX_OUTSTANDING_FRAMES
         || config->max_outstanding_frames > config->channel_buffers
-        || config->raw10_layout > DART_CAMERA_RAW10_PACKED_LSB || config->binary_threshold > 255u
+        || config->raw10_layout > DART_CAMERA_RAW10_PACKED_LSB
         || config->exposure_mode > DART_CAMERA_EXPOSURE_AUTO
         || (config->exposure_mode == DART_CAMERA_EXPOSURE_AUTO
             && config->initial_exposure_lines != 0u)) {

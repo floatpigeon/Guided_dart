@@ -235,6 +235,26 @@ if(DART_IMU_CLANGD_COMMANDS AND NOT DART_IMU_K230)
 endif()
 
 # ---------------------------------------------------------------------------
+# PWM: platform-neutral device interface and independent output task.
+# Vendor headers stay in the board backend, below L4.
+# ---------------------------------------------------------------------------
+option(DART_PWM_K230 "Build the K230 four-channel servo PWM backend" ${DART_CAMERA_K230})
+add_library(dart_pwm INTERFACE)
+target_compile_features(dart_pwm INTERFACE cxx_std_23)
+target_compile_options(dart_pwm INTERFACE -Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti)
+target_include_directories(dart_pwm INTERFACE "${_dart_src}")
+target_link_libraries(dart_pwm INTERFACE Threads::Threads)
+add_library(dart_pwm_checks OBJECT "${_dart_src}/pwm/interface.cpp" "${_dart_src}/pwm/session.cpp")
+target_link_libraries(dart_pwm_checks PRIVATE dart_pwm)
+if(DART_PWM_K230)
+    if(NOT CMAKE_CROSSCOMPILING OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "riscv")
+        message(FATAL_ERROR "DART_PWM_K230 requires a RISC-V cross toolchain")
+    endif()
+    add_library(dart_pwm_k230_checks OBJECT "${_dart_src}/pwm/k230/output.cpp")
+    target_link_libraries(dart_pwm_k230_checks PRIVATE dart_pwm k230_rtos_app)
+endif()
+
+# ---------------------------------------------------------------------------
 # System adapters: process lifetime, logging and filesystem implementation.
 # ---------------------------------------------------------------------------
 add_library(dart_platform INTERFACE)
@@ -289,7 +309,11 @@ target_link_libraries(dart_recording_checks PRIVATE dart_recording)
 # dart_imu_logging is declared by runtime/ after this directory is configured.
 # ---------------------------------------------------------------------------
 add_library(dart_board INTERFACE)
-target_link_libraries(dart_board INTERFACE dart_platform dart_camera_acl dart_imu_logging)
+target_link_libraries(dart_board INTERFACE dart_platform dart_camera_acl dart_imu_logging dart_pwm)
+if(DART_PWM_K230)
+    target_compile_definitions(dart_board INTERFACE DART_APP_PWM_K230=1)
+    target_link_libraries(dart_board INTERFACE k230_rtos_app)
+endif()
 if(DART_IMU_K230)
     target_compile_definitions(dart_board INTERFACE DART_APP_IMU_K230=1)
     target_link_libraries(dart_board INTERFACE dart_imu_k230)

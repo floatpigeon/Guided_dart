@@ -50,7 +50,7 @@ inline recorder::Config
     // Pixels are copied before enqueue; this does not hold 16 camera leases.
     config.queue_slots = 16;
     config.image_format = args.record_format;
-    config.pbm_threshold = 128;
+    config.pbm_threshold = static_cast<std::uint8_t>(args.threshold);
     config.output_directory = std::string_view{args.rec_dir};
     if (config.output_directory == "/data" || config.output_directory.starts_with("/data/"))
         config.max_storage_bytes = recorder::Config::kMaxStorageBytes;
@@ -73,7 +73,8 @@ inline bool start_recording(
         "format=%s "
         "max_file_bytes=%llu file_limit_bytes=%llu max_storage_bytes=%llu queued=%u\n",
         rec.directory(), rec.recording_path(), config.fps,
-        config.image_format == recorder::ImageFormat::kPng   ? "png"
+        config.image_format == recorder::ImageFormat::kDbv   ? "dbv"
+        : config.image_format == recorder::ImageFormat::kPng ? "png"
         : config.image_format == recorder::ImageFormat::kPbm ? "pbm"
                                                              : "pgm",
         static_cast<unsigned long long>(config.max_file_bytes),

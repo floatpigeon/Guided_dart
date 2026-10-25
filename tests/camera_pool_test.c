@@ -494,7 +494,7 @@ static void invalid_modes(void) {
     }
 }
 
-static void raw_binary_frames(void) {
+static void raw_gray_frames(void) {
     for (uint32_t layout = 0; layout <= DART_CAMERA_RAW10_PACKED_LSB; ++layout) {
         reset_fake();
         sensor_unknown_fps = 1;
@@ -525,15 +525,15 @@ static void raw_binary_frames(void) {
         assert(dart_camera_start(camera) == 0 && exposure_calls == 0);
         dart_camera_frame_t first, second, extra;
         assert(dart_camera_acquire_frame(camera, 20, &first) == 0);
-        assert(dumps_held == 0);           /* Recorder holds only binary CPU pixels. */
-        assert(first.stride == WIDTH && first.data[199] == 0 && first.data[200] == 255);
-        assert(first.data[(HEIGHT - 1) * WIDTH + 199] == 0);
-        assert(first.data[(HEIGHT - 1) * WIDTH + 200] == 255);
+        assert(dumps_held == 0);           /* Recorder holds only grayscale CPU pixels. */
+        assert(first.stride == WIDTH && first.data[199] == 49 && first.data[200] == 50);
+        assert(first.data[(HEIGHT - 1) * WIDTH + 199] == 49);
+        assert(first.data[(HEIGHT - 1) * WIDTH + 200] == 50);
         assert(first.data != pixels[1]);
         assert(dart_camera_acquire_frame(camera, 20, &second) == 0);
-        assert(first.data != second.data && first.data[199] == 0 && first.data[200] == 255);
+        assert(first.data != second.data && first.data[199] == 49 && first.data[200] == 50);
         memset(pixels, 0, sizeof(pixels)); /* DMA reuse cannot change leased pixels. */
-        assert(first.data[200] == 255 && second.data[200] == 255);
+        assert(first.data[200] == 50 && second.data[200] == 50);
         assert(dart_camera_acquire_frame(camera, 0, &extra) == DART_CAMERA_E_LEASE_EXHAUSTED);
         assert(dart_camera_stop(camera) == DART_CAMERA_E_BUSY);
         assert(dart_camera_release_frame(camera, &second) == 0);
@@ -734,7 +734,7 @@ int main(void) {
     assert(__wrap_ioctl(77, 1234, (void*)NULL) == 27);
     line_exposure();
     line_exposure_failures();
-    raw_binary_frames();
+    raw_gray_frames();
     raw_rollback();
     invalid_modes();
     dart_media_t* media = NULL;

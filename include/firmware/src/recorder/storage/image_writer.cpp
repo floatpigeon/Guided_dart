@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "camera/frame_view.cpp"
+#include "recorder/encoding/binary_encoder.cpp"
 #include "recorder/encoding/png_encoder.cpp"
 #include "recorder/storage/image_files.cpp"
 #include "recorder/storage/session.cpp"
@@ -30,6 +31,11 @@ public:
         frame_bytes_ = frame_bytes;
         if (config_.image_format == ImageFormat::kPng)
             return png_.prepare(config_.width, config_.height, config_.pbm_threshold);
+        if (config_.image_format == ImageFormat::kDbv) {
+            file_buffer_.reset(new (std::nothrow) char[kFileBufferBytes]);
+            return file_buffer_
+                && binary_.prepare(config_.width, config_.height, config_.pbm_threshold);
+        }
         const bool pbm = config_.image_format == ImageFormat::kPbm;
         const int n =
             pbm ? std::snprintf(
@@ -51,7 +57,9 @@ public:
     }
     bool open(RecorderError& error) noexcept {
         files_.reset();
-        bytes_written_ = last_png_bytes_ = 0;
+        bytes_written_ = last_record_bytes_ = 0;
+        last_offset_ = 0;
+        binary_.reset();
         image_name_[0] = '\0';
         if (config_.image_format == ImageFormat::kPng) {
             last_flush_ = std::chrono::steady_clock::now();
@@ -92,9 +100,9 @@ public:
                  : frame_bytes_;
     }
     std::size_t record_bytes() const noexcept {
-        return config_.image_format == ImageFormat::kPng ? last_png_bytes_
-                                                         : header_bytes_ + payload_bytes();
+        return config_.variable_record_size() ? last_record_bytes_ : header_bytes_ + payload_bytes();
     }
+    std::uint64_t file_offset() const noexcept { return last_offset_; }
     const char* image_name() const noexcept { return image_name_; }
     std::uint64_t pack_us() const noexcept { return pack_us_; }
     std::uint64_t io_us() const noexcept { return io_us_; }
@@ -105,6 +113,7 @@ public:
 
 private:
     bool write_png(std::span<const std::byte> pixels, std::uint64_t index) noexcept;
+    bool write_binary(std::span<const std::byte> pixels) noexcept;
     bool sync() noexcept {
         // fflush only drains libc. FAT updates the directory size and cluster
         // chain on fsync; without it a reset can leave a zero-byte recording.
@@ -121,7 +130,9 @@ private:
     std::unique_ptr<std::byte[]> pbm_frame_{};
     std::unique_ptr<char[]> file_buffer_{};
     PngEncoder png_{};
-    std::size_t last_png_bytes_ = 0;
+    BinaryEncoder binary_{};
+    std::size_t last_record_bytes_ = 0;
+    std::uint64_t last_offset_ = 0;
     char image_name_[48]{};
     std::FILE* file_ = nullptr;
     std::uint64_t bytes_written_ = 0;
@@ -216,7 +227,7 @@ inline bool
     close_us_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                                std::chrono::steady_clock::now() - write_end)
                                                .count());
-    last_png_bytes_ = encoded.size();
+    last_record_bytes_ = encoded.size();
     bytes_written_ += encoded.size();
     io_us_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                             std::chrono::steady_clock::now() - io_begin)
@@ -225,7 +236,54 @@ inline bool
 }
 
 inline bool
+    ImageWriter::write_binary(std::span<const std::byte> pixels) noexcept {
+    if (!file_)
+        return false;
+    const auto begin = std::chrono::steady_clock::now();
+    const auto encoded = binary_.encode(pixels);
+    const auto encoded_at = std::chrono::steady_clock::now();
+    pack_us_ = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(encoded_at - begin).count());
+    if (encoded.empty()) {
+        errno = EIO;
+        return false;
+    }
+    const auto header = bytes_written_ == 0 ? BinaryFormat::kHeaderBytes : 0;
+    const auto size = header + encoded.size();
+    if (size > session_.file_limit_bytes() - bytes_written_) {
+        errno = EFBIG;
+        return false;
+    }
+    if (!files_.space_available(size))
+        return false;
+    const auto space_at = std::chrono::steady_clock::now();
+    space_us_ = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(space_at - encoded_at).count());
+    std::byte geometry[BinaryFormat::kHeaderBytes];
+    BinaryFormat::header(geometry, config_.width, config_.height);
+    if ((header && std::fwrite(geometry, 1, header, file_) != header)
+        || std::fwrite(encoded.data(), 1, encoded.size(), file_) != encoded.size())
+        return false;
+    if (bytes_written_ == 0 || space_at - last_flush_ >= config_.flush_period) {
+        if (!sync())
+            return false;
+        last_flush_ = space_at;
+    }
+    last_offset_ = bytes_written_;
+    last_record_bytes_ = size;
+    bytes_written_ += size;
+    (void)std::snprintf(image_name_, sizeof(image_name_), "img/recording.dbv");
+    io_us_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - encoded_at).count());
+    write_us_ = io_us_ - space_us_;
+    open_us_ = close_us_ = 0;
+    return true;
+}
+
+inline bool
     ImageWriter::write_image(std::span<const std::byte> pixels, std::uint64_t index) noexcept {
+    if (config_.image_format == ImageFormat::kDbv)
+        return write_binary(pixels);
     if (config_.image_format == ImageFormat::kPng)
         return write_png(pixels, index);
     if (file_ == nullptr || pixels.size() < frame_bytes_)
