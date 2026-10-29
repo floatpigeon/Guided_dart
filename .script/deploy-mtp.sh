@@ -58,8 +58,6 @@ ensure_dir() { gio info "$1" >/dev/null 2>&1 || gio mkdir "$1"; }
 ensure_dir "${APP}"
 
 BACKUP_DIR="$(mktemp -d /tmp/dart-mtp-backup.XXXXXX)"
-TOKEN="${BACKUP_DIR##*.}-$$"
-STAGED=()
 HAD_OLD=()
 cleanup() {
     local uri
@@ -68,48 +66,51 @@ cleanup() {
 trap cleanup EXIT
 printf '目标：%s（板端 %s）\n旧文件备份：%s\n' "${APP}" "${BOARD_DIR}" "${BACKUP_DIR}"
 
-# 所有旧文件先备份，所有新文件先上传并校验；任何失败都在替换前停止。
+# 当前 gvfsd-gphoto2 的 gio move/rename 会误报 -103（即使目标不存在），
+# 用 gio copy 覆盖已有文件又会写出 0 字节。可靠序列只有：
+#   删除目标名 -> 从本地上传到该名字 -> 完整回读校验
+# 因此不再上传 .upload-* 临时文件；同名临时文件也会让紧接着的 copy 误报 -103。
+# 重试一次，覆盖后端偶尔残留的旧目录项。
+replace_file() {
+    local src=$1 dst=$2
+    gio remove -f "${dst}" >/dev/null 2>&1 || true
+    gio copy -T "${src}" "${dst}" && return 0
+    gio remove -f "${dst}" >/dev/null 2>&1 || true
+    gio copy -T "${src}" "${dst}"
+}
+
+# 先备份所有旧文件；用 gio cat 读回，避免 gio copy 到本地污染后端缓存。
 for i in "${!NAMES[@]}"; do
     dst="${APP}/${NAMES[i]}"
     if gio info "${dst}" >/dev/null 2>&1; then
         mkdir -p "${BACKUP_DIR}/$(dirname "${NAMES[i]}")"
-        gio copy -T "${dst}" "${BACKUP_DIR}/${NAMES[i]}"
+        gio cat "${dst}" > "${BACKUP_DIR}/${NAMES[i]}"
         verify "${BACKUP_DIR}/${NAMES[i]}" "${dst}" || die "旧文件备份校验失败：${NAMES[i]}"
         HAD_OLD+=(1)
     else
         HAD_OLD+=(0)
     fi
-    stage="${dst}.upload-${TOKEN}"
-    STAGED+=("${stage}")
-    gio copy -T "${SOURCES[i]}" "${stage}"
-    verify "${SOURCES[i]}" "${stage}" || die "上传回读校验失败：${NAMES[i]}，旧文件未替换"
-    printf '  已上传并校验 %s\n' "${NAMES[i]}"
 done
 
+# 再逐个替换；任何一步失败都先删掉坏文件，再用主机备份恢复。
 for i in "${!NAMES[@]}"; do
     dst="${APP}/${NAMES[i]}"
-    old="${dst}.previous-${TOKEN}"
-    if [[ "${HAD_OLD[i]}" == 1 ]]; then
-        gio move -T --no-copy-fallback "${dst}" "${old}"
-    fi
-    if ! gio move -T --no-copy-fallback "${STAGED[i]}" "${dst}"; then
+    if ! replace_file "${SOURCES[i]}" "${dst}"; then
+        gio remove -f "${dst}" >/dev/null 2>&1 || true
         if [[ "${HAD_OLD[i]}" == 1 ]]; then
-            gio move -T --no-copy-fallback "${old}" "${dst}" \
-                || die "替换和恢复均失败；旧文件位于 ${old}，主机备份位于 ${BACKUP_DIR}"
+            replace_file "${BACKUP_DIR}/${NAMES[i]}" "${dst}" \
+                || die "替换和恢复均失败；主机备份位于 ${BACKUP_DIR}"
         fi
-        die "替换失败：${NAMES[i]}；主机备份位于 ${BACKUP_DIR}"
+        die "替换失败：${NAMES[i]}；主机备份位于 ${BACKUP_DIR}（如提示 -103，请重插 USB 或重新 gio mount）"
     fi
     if ! verify "${SOURCES[i]}" "${dst}"; then
-        # 将失败的新文件移开，恢复原名；本地主机备份始终保留。
-        gio move -T --no-copy-fallback "${dst}" "${STAGED[i]}" \
-            || die "最终校验失败且无法移开新文件：${dst}；旧文件/备份保留"
+        gio remove -f "${dst}" >/dev/null 2>&1 || true
         if [[ "${HAD_OLD[i]}" == 1 ]]; then
-            gio move -T --no-copy-fallback "${old}" "${dst}" \
-                || die "恢复失败；旧文件位于 ${old}，主机备份位于 ${BACKUP_DIR}"
+            replace_file "${BACKUP_DIR}/${NAMES[i]}" "${dst}" \
+                || die "恢复失败；主机备份位于 ${BACKUP_DIR}"
         fi
         die "最终校验失败：${NAMES[i]}；主机备份位于 ${BACKUP_DIR}"
     fi
-    if [[ "${HAD_OLD[i]}" == 1 ]]; then gio remove "${old}"; fi
     printf '  %s：%s bytes，SHA-256 %s\n' "${NAMES[i]}" \
         "$(stat -c %s "${SOURCES[i]}")" "$(local_hash "${SOURCES[i]}")"
 done
